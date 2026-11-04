@@ -67,10 +67,9 @@ pub fn read_sheet(
     sheet: Option<&str>,
     max_rows: usize,
 ) -> Result<ReadResult, ReadError> {
-    let mut workbook: Xlsx<_> = Xlsx::new(
-        std::fs::File::open(path).map_err(|e| ReadError::Open(e.to_string()))?,
-    )
-    .map_err(|e| ReadError::Open(e.to_string()))?;
+    let mut workbook: Xlsx<_> =
+        Xlsx::new(std::fs::File::open(path).map_err(|e| ReadError::Open(e.to_string()))?)
+            .map_err(|e| ReadError::Open(e.to_string()))?;
     let names = workbook.sheet_names().to_vec();
     if names.is_empty() {
         return Err(ReadError::Open("workbook has no sheets".into()));
@@ -95,9 +94,7 @@ pub fn read_sheet(
     let range: Range<CellData> = workbook
         .worksheet_range(&name)
         .map_err(|e| ReadError::Open(e.to_string()))?;
-    let formulas: Range<String> = workbook
-        .worksheet_formula(&name)
-        .unwrap_or_default();
+    let formulas: Range<String> = workbook.worksheet_formula(&name).unwrap_or_default();
 
     // IronCalc recompute (fail-soft, pattern from genoffice xlsx-sidecar).
     let computed = recompute(path);
@@ -107,8 +104,8 @@ pub fn read_sheet(
     // on an empty sheet, in which case size is 0.
     let val_end = range.end();
     let mut cells = BTreeMap::new();
-    let total_rows = val_end.map(|e| (e.0 + 1) as u32).unwrap_or(0);
-    let total_cols = val_end.map(|e| (e.1 + 1) as u32).unwrap_or(0);
+    let total_rows: u32 = val_end.map(|e| e.0 + 1).unwrap_or(0);
+    let total_cols: u32 = val_end.map(|e| e.1 + 1).unwrap_or(0);
     let truncated = (total_rows as usize) > max_rows;
     let rows_to_read = (total_rows as usize).min(max_rows);
     for r in 0..rows_to_read {
@@ -150,8 +147,8 @@ pub fn read_sheet(
             .iter()
             .map(|n| SheetSummary {
                 name: n.clone(),
-                rows: if *n == name { total_rows as u32 } else { 0 },
-                cols: if *n == name { total_cols as u32 } else { 0 },
+                rows: if *n == name { total_rows } else { 0 },
+                cols: if *n == name { total_cols } else { 0 },
             })
             .collect(),
         cells,
@@ -260,7 +257,13 @@ pub fn to_markdown(result: &ReadResult) -> String {
     let mut lines = Vec::new();
     let header: Vec<String> = (0..=max_col).map(|c| cell_value(0, c)).collect();
     lines.push(format!("| {} |", header.join(" | ")));
-    lines.push(format!("|{}|", (0..=max_col).map(|_| "---".to_string()).collect::<Vec<_>>().join("|")));
+    lines.push(format!(
+        "|{}|",
+        (0..=max_col)
+            .map(|_| "---".to_string())
+            .collect::<Vec<_>>()
+            .join("|")
+    ));
     for r in 1..max_row {
         let row: Vec<String> = (0..=max_col).map(|c| cell_value(r, c)).collect();
         lines.push(format!("| {} |", row.join(" | ")));
@@ -275,7 +278,9 @@ pub fn to_markdown(result: &ReadResult) -> String {
 }
 
 fn col_letters(addr: &str) -> String {
-    addr.chars().take_while(|c| c.is_ascii_alphabetic()).collect()
+    addr.chars()
+        .take_while(|c| c.is_ascii_alphabetic())
+        .collect()
 }
 
 fn letters_to_index(letters: &str) -> usize {
@@ -294,10 +299,7 @@ mod tests {
     fn write_fixture(rows: Vec<Vec<serde_json::Value>>) -> std::path::PathBuf {
         let dir = std::env::temp_dir();
         let p = dir.join(format!("excel-mcp-test-{}.xlsx", uuid::Uuid::new_v4()));
-        let sheets = vec![SheetData {
-            name: None,
-            rows,
-        }];
+        let sheets = vec![SheetData { name: None, rows }];
         std::fs::write(&p, build_xlsx(&sheets).unwrap()).unwrap();
         p
     }
