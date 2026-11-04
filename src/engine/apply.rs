@@ -39,14 +39,9 @@ pub enum WorkbookOp {
         count: u32,
     },
     /// Append a new sheet.
-    AddSheet {
-        name: String,
-    },
+    AddSheet { name: String },
     /// Rename a sheet.
-    RenameSheet {
-        from: String,
-        to: String,
-    },
+    RenameSheet { from: String, to: String },
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -69,7 +64,10 @@ pub enum ApplyError {
 /// row part digits.
 pub fn parse_a1(address: &str) -> Result<(u32, u32), ApplyError> {
     let addr = address.trim();
-    let letters: String = addr.chars().take_while(|c| c.is_ascii_alphabetic()).collect();
+    let letters: String = addr
+        .chars()
+        .take_while(|c| c.is_ascii_alphabetic())
+        .collect();
     let digits: &str = &addr[letters.len()..];
     if letters.is_empty() || digits.is_empty() || !digits.chars().all(|c| c.is_ascii_digit()) {
         return Err(ApplyError::BadAddress(address.to_string()));
@@ -97,16 +95,19 @@ fn parse_col_spec(spec: &str) -> Result<u32, ApplyError> {
     if s.chars().all(|c| c.is_ascii_alphabetic()) && !s.is_empty() {
         return parse_a1(&format!("{s}1")).map(|(col, _)| col);
     }
-    if let Ok(n) = s.parse::<u32>() {
-        if n > 0 {
-            return Ok(n);
-        }
+    if let Ok(n) = s.parse::<u32>()
+        && n > 0
+    {
+        return Ok(n);
     }
     Err(ApplyError::BadOp(format!("bad column: {spec}")))
 }
 
 /// Find a sheet by name (or default to the first sheet).
-fn sheet_index_by_name(book: &umya_spreadsheet::Workbook, sheet: Option<&str>) -> Result<usize, ApplyError> {
+fn sheet_index_by_name(
+    book: &umya_spreadsheet::Workbook,
+    sheet: Option<&str>,
+) -> Result<usize, ApplyError> {
     let Some(name) = sheet else {
         return Ok(0);
     };
@@ -127,8 +128,8 @@ pub fn apply_edits(
     cells: &[CellEdit],
     ops: &[WorkbookOp],
 ) -> Result<usize, ApplyError> {
-    let mut book = umya_spreadsheet::reader::xlsx::read(src)
-        .map_err(|e| ApplyError::Open(e.to_string()))?;
+    let mut book =
+        umya_spreadsheet::reader::xlsx::read(src).map_err(|e| ApplyError::Open(e.to_string()))?;
     let target = sheet_index_by_name(&book, sheet)?;
 
     let mut applied = 0;
@@ -247,9 +248,18 @@ mod tests {
             &dst,
             None,
             &[
-                CellEdit { address: "B2".into(), value: serde_json::json!(9) },
-                CellEdit { address: "A3".into(), value: serde_json::json!("cherry") },
-                CellEdit { address: "B3".into(), value: serde_json::json!("=SUM(B2:B2)") },
+                CellEdit {
+                    address: "B2".into(),
+                    value: serde_json::json!(9),
+                },
+                CellEdit {
+                    address: "A3".into(),
+                    value: serde_json::json!("cherry"),
+                },
+                CellEdit {
+                    address: "B3".into(),
+                    value: serde_json::json!("=SUM(B2:B2)"),
+                },
             ],
             &[],
         )
@@ -277,7 +287,11 @@ mod tests {
             &dst,
             None,
             &[],
-            &[WorkbookOp::InsertRows { sheet: None, row: 2, count: 1 }],
+            &[WorkbookOp::InsertRows {
+                sheet: None,
+                row: 2,
+                count: 1,
+            }],
         )
         .unwrap();
         // Row 2 was blank; "b" moved to row 3, "c" to row 4.
@@ -288,16 +302,18 @@ mod tests {
 
     #[test]
     fn insert_cols_shifts_values() {
-        let src = write_fixture(vec![
-            vec![serde_json::json!("a"), serde_json::json!("b")],
-        ]);
+        let src = write_fixture(vec![vec![serde_json::json!("a"), serde_json::json!("b")]]);
         let dst = out_path();
         apply_edits(
             &src,
             &dst,
             None,
             &[],
-            &[WorkbookOp::InsertCols { sheet: None, col: "A".into(), count: 1 }],
+            &[WorkbookOp::InsertCols {
+                sheet: None,
+                col: "A".into(),
+                count: 1,
+            }],
         )
         .unwrap();
         assert_eq!(read_back_cell(&dst, "A1"), None);
@@ -315,8 +331,13 @@ mod tests {
             None,
             &[],
             &[
-                WorkbookOp::AddSheet { name: "Data".into() },
-                WorkbookOp::RenameSheet { from: "Sheet1".into(), to: "Main".into() },
+                WorkbookOp::AddSheet {
+                    name: "Data".into(),
+                },
+                WorkbookOp::RenameSheet {
+                    from: "Sheet1".into(),
+                    to: "Main".into(),
+                },
             ],
         )
         .unwrap();
@@ -338,7 +359,10 @@ mod tests {
             &src,
             &dst,
             Some("nope"),
-            &[CellEdit { address: "A1".into(), value: serde_json::json!(1) }],
+            &[CellEdit {
+                address: "A1".into(),
+                value: serde_json::json!(1),
+            }],
             &[],
         );
         assert!(err.is_err());
@@ -346,14 +370,20 @@ mod tests {
 
     #[test]
     fn source_file_is_untouched() {
-        let src = write_fixture(vec![vec![serde_json::json!("original")], vec![serde_json::json!("x")]]);
+        let src = write_fixture(vec![
+            vec![serde_json::json!("original")],
+            vec![serde_json::json!("x")],
+        ]);
         let before = std::fs::read(&src).unwrap();
         let dst = out_path();
         apply_edits(
             &src,
             &dst,
             None,
-            &[CellEdit { address: "A1".into(), value: serde_json::json!("edited") }],
+            &[CellEdit {
+                address: "A1".into(),
+                value: serde_json::json!("edited"),
+            }],
             &[],
         )
         .unwrap();

@@ -4,8 +4,8 @@
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::*;
 use rmcp::tool;
-use rmcp::{tool_handler, tool_router};
 use rmcp::{ErrorData as McpError, ServerHandler};
+use rmcp::{tool_handler, tool_router};
 use schemars::JsonSchema;
 use serde::Deserialize;
 
@@ -83,18 +83,16 @@ impl ExcelMcp {
         let mut sheets = crate::engine::create::parse_data(&args.data)
             .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
         // A bare 2-D array plus sheet_name: name the only sheet.
-        if let (Some(name), true) = (args.sheet_name.clone(), sheets.len() == 1) {
-            if sheets[0].name.is_none() {
-                sheets[0].name = Some(name);
-            }
+        if let (Some(name), true) = (args.sheet_name.clone(), sheets.len() == 1)
+            && sheets[0].name.is_none()
+        {
+            sheets[0].name = Some(name);
         }
         let cells = crate::engine::create::count_cells(&sheets);
-        let bytes = tokio::task::spawn_blocking(move || {
-            crate::engine::create::build_xlsx(&sheets)
-        })
-        .await
-        .map_err(|_| McpError::internal_error("engine task failed", None))?
-        .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+        let bytes = tokio::task::spawn_blocking(move || crate::engine::create::build_xlsx(&sheets))
+            .await
+            .map_err(|_| McpError::internal_error("engine task failed", None))?
+            .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
 
         // Resolve output key: explicit (validated) or generated.
         let output_key = match args.output_key.as_deref() {
@@ -125,8 +123,7 @@ impl ExcelMcp {
         let inline_limit = self.cfg.inline_max_bytes as usize;
         let mut obj = serde_json::json!({ "s3_key": output_key, "cells_written": cells });
         if bytes.len() <= inline_limit {
-            obj["content_b64"] =
-                serde_json::Value::String(crate::util::base64_encode(&bytes));
+            obj["content_b64"] = serde_json::Value::String(crate::util::base64_encode(&bytes));
         }
         Ok(CallToolResult::success(vec![ContentBlock::text(
             obj.to_string(),
@@ -212,7 +209,8 @@ impl ExcelMcp {
                 &cells,
                 &ops,
             )?;
-            std::fs::read(dst.path()).map_err(|e| crate::engine::apply::ApplyError::Open(e.to_string()))
+            std::fs::read(dst.path())
+                .map_err(|e| crate::engine::apply::ApplyError::Open(e.to_string()))
                 .map(|b| (b, applied))
         })
         .await
