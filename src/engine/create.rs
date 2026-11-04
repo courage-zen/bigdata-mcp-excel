@@ -208,7 +208,7 @@ mod tests {
         }];
         let bytes = build_xlsx(&sheets).unwrap();
         use calamine::{Reader, Xlsx};
-        let mut reader = Xlsx::new(std::io::Cursor::new(bytes)).unwrap();
+        let reader = Xlsx::new(std::io::Cursor::new(bytes)).unwrap();
         let names = reader.sheet_names();
         assert!(names.iter().any(|n| !n.contains('/')));
     }
@@ -227,7 +227,7 @@ mod tests {
         ];
         let bytes = build_xlsx(&sheets).unwrap();
         use calamine::{Reader, Xlsx};
-        let mut reader = Xlsx::new(std::io::Cursor::new(bytes)).unwrap();
+        let reader = Xlsx::new(std::io::Cursor::new(bytes)).unwrap();
         let names = reader.sheet_names();
         assert!(names.contains(&"Sheet1".to_string()));
         assert!(names.contains(&"Sheet2".to_string()));

@@ -12,13 +12,6 @@ const DANGEROUS_EXTENSIONS: [&str; 12] = [
 #[error("invalid s3 key: {0}")]
 pub struct InvalidKey(String);
 
-impl InvalidKey {
-    /// The violation's human-readable reason (already formatted).
-    pub fn reason(&self) -> &str {
-        &self.0
-    }
-}
-
 /// Validate an input key against the configured allowlist.
 ///
 /// Rules (markitdown-mcp parity):
