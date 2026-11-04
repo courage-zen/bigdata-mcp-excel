@@ -1,0 +1,119 @@
+# Example Kubernetes deployment for excel-mcp.
+#
+# Prerequisites:
+#   1. Build or download the image:
+#        # From a GitHub release attachment:
+#        gunzip -c excel-mcp-image-linux-amd64.tar.gz | docker load
+#        # Or build from source:
+#        docker build -t excel-mcp:0.1.0 -f deploy/Dockerfile .
+#   2. Push it to your registry and update the image reference below:
+#        docker tag excel-mcp:0.1.0 registry.example.com/excel-mcp:0.1.0
+#        docker push registry.example.com/excel-mcp:0.1.0
+#   3. Create the auth-key secret:
+#        kubectl create secret generic excel-mcp-auth \
+#          --from-literal=auth-key='<your-key>'
+#   4. Create the S3 credentials secret (MinIO or AWS S3):
+#        kubectl create secret generic excel-mcp-s3 \
+#          --from-literal=AWS_ACCESS_KEY_ID='<access-key>' \
+#          --from-literal=AWS_SECRET_ACCESS_KEY='<secret-key>'
+#
+# The server is stateless: replicas can be scaled freely and requests may
+# hit any pod. Each pod exposes MCP at /mcp and a health endpoint at
+# /health (auth-exempt, used by the probes below). All workbook IO goes
+# through S3 — no local filesystem state survives a pod restart.
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: excel-mcp
+  labels:
+    app: excel-mcp
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: excel-mcp
+  template:
+    metadata:
+      labels:
+        app: excel-mcp
+    spec:
+      containers:
+        - name: excel-mcp
+          image: registry.example.com/excel-mcp:0.1.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: MCP_HOST
+              value: "0.0.0.0"
+            - name: MCP_PORT
+              value: "8080"
+            - name: MCP_AUTH_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: excel-mcp-auth
+                  key: auth-key
+            # REQUIRED: the S3 bucket all workbooks are read from and
+            # written to. Without S3_* and AWS_* set, every tool call
+            # fails with "not configured".
+            - name: S3_BUCKET
+              value: "uploads"
+            # In-cluster MinIO example (adjust the namespace):
+            # - name: AWS_ENDPOINT_URL
+            #   value: "http://minio.<namespace>.svc.cluster.local:9000"
+            # - name: S3_USE_PATH_STYLE
+            #   value: "true"
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: excel-mcp-s3
+                  key: AWS_ACCESS_KEY_ID
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: excel-mcp-s3
+                  key: AWS_SECRET_ACCESS_KEY
+            # Optional knobs (defaults shown):
+            # - name: S3_REGION
+            #   value: "us-east-1"
+            # - name: S3_OUTPUT_PREFIX
+            #   value: "excel-mcp-out/"
+            # - name: S3_KEY_PREFIXES
+            #   value: ""            # restrict readable input prefixes
+            # - name: EXCEL_INLINE_MAX_BYTES
+            #   value: "2097152"     # base64 inline cutoff (2 MiB)
+            # - name: EXCEL_MAX_FILE_BYTES
+            #   value: "52428800"    # upload/download cap (50 MiB)
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: excel-mcp
+spec:
+  selector:
+    app: excel-mcp
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
