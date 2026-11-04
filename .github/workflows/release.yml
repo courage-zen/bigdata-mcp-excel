@@ -1,0 +1,247 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Check formatting
+        run: cargo fmt --check
+      - name: Lint
+        run: cargo clippy -- -D warnings
+      - name: Run tests
+        run: cargo test
+
+  image:
+    runs-on: ubuntu-latest
+    needs: test
+    strategy:
+      matrix:
+        include:
+          - arch: amd64
+          - arch: arm64
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up QEMU (arm64 emulation)
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Build image (linux/${{ matrix.arch }})
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          docker buildx build \
+            --platform "linux/${{ matrix.arch }}" \
+            --tag "excel-mcp:${TAG}" \
+            --file deploy/Dockerfile \
+            --load \
+            .
+      - name: Export image tarball
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          mkdir -p release
+          docker save "excel-mcp:${TAG}" | gzip > "release/excel-mcp-image-linux-${{ matrix.arch }}.tar.gz"
+          ls -lh release/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-image-linux-${{ matrix.arch }}
+          path: release/*
+          if-no-files-found: error
+
+  smoke:
+    runs-on: ubuntu-latest
+    needs: image
+    steps:
+      - uses: actions/checkout@v4
+      - name: Start S3 backend (moto server)
+        # excel-mcp's inputs and outputs are S3 keys, so the round-trip needs
+        # a real S3 endpoint. MinIO images are no longer anonymously pullable
+        # (removed from Docker Hub; quay.io requires a login), so serve the
+        # S3 API from moto. Bind 0.0.0.0 — the server container reaches the
+        # host through host.docker.internal. No EXIT trap: each step runs in
+        # its own shell; the ephemeral runner handles cleanup.
+        run: |
+          python3 -m venv /tmp/s3env
+          /tmp/s3env/bin/pip install --quiet "moto[server]" boto3
+          /tmp/s3env/bin/moto_server -H 0.0.0.0 -p 9000 > /tmp/moto.log 2>&1 &
+      - name: Download amd64 image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: release-image-linux-amd64
+          path: image
+      - name: Load and start the server
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          docker load < image/excel-mcp-image-linux-amd64.tar.gz
+          docker run -d --rm \
+            --name excel-mcp-smoke \
+            --add-host=host.docker.internal:host-gateway \
+            -e MCP_AUTH_KEY=smoke-key \
+            -e S3_BUCKET=excel-uploads \
+            -e AWS_ACCESS_KEY_ID=smoke-access \
+            -e AWS_SECRET_ACCESS_KEY=smoke-secret \
+            -e AWS_ENDPOINT_URL=http://host.docker.internal:9000 \
+            -e S3_USE_PATH_STYLE=1 \
+            -p 8124:8080 \
+            "excel-mcp:${TAG}"
+
+          for i in $(seq 1 30); do
+            if [ "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8124/health)" = "200" ]; then
+              break
+            fi
+            sleep 1
+          done
+          curl -sf http://127.0.0.1:8124/health | grep -q '"ok"'
+      - name: Seed the S3 backend and smoke-test the MCP surface
+        # Responses arrive as text/event-stream frames ("data: <json>");
+        # `sed -n 's/^data://p'` unwraps them for python. A second session
+        # header capture is needed after initialize — rmcp's session manager
+        # rejects tool calls without Mcp-Session-Id.
+        run: |
+          # Wait for moto to answer, create the bucket, seed an input object.
+          for i in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:9000/ > /dev/null 2>&1; then break; fi
+            sleep 2
+          done
+          /tmp/s3env/bin/python - <<'EOF'
+          import boto3
+
+          client = boto3.client(
+              "s3",
+              endpoint_url="http://127.0.0.1:9000",
+              aws_access_key_id="smoke-access",
+              aws_secret_access_key="smoke-secret",
+              region_name="us-east-1",
+          )
+          client.create_bucket(Bucket="excel-uploads")
+          print("bucket created")
+          EOF
+
+          AUTH='Authorization: Bearer smoke-key'
+          CT='Content-Type: application/json'
+          ACCEPT='Accept: application/json, text/event-stream'
+          BASE='http://127.0.0.1:8124/mcp'
+          INIT='{"jsonrpc":"2.0","method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"smoke","version":"1"}},"id":1}'
+
+          # No token -> 401
+          code="$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE" \
+            -H "$CT" -d "$INIT")"
+          [ "${code}" = "401" ] || { echo "expected 401 without token, got ${code}"; exit 1; }
+
+          # Handshake works with the token; capture the session id.
+          SID="$(curl -s -D - -o /dev/null -X POST "$BASE" -H "$AUTH" -H "$CT" -H "$ACCEPT" \
+            -d "$INIT" | tr -d '\r' | awk -F': ' '/^mcp-session-id:/{print $2}')"
+          [ -n "$SID" ] || { echo 'no session id in initialize response'; exit 1; }
+
+          # Exactly the three expected tools (presence checks; order is not
+          # guaranteed).
+          tools="$(curl -sf -X POST "$BASE" -H "$AUTH" -H "Mcp-Session-Id: $SID" -H "$CT" -H "$ACCEPT" \
+            -d '{"jsonrpc":"2.0","method":"tools/list","id":2}')"
+          echo "$tools" | grep -q 'create_xlsx' || { echo 'create_xlsx missing'; exit 1; }
+          echo "$tools" | grep -q 'sheet_read' || { echo 'sheet_read missing'; exit 1; }
+          echo "$tools" | grep -q 'sheet_apply' || { echo 'sheet_apply missing'; exit 1; }
+
+          # create -> read round-trip through s3 keys
+          created="$(curl -sf -X POST "$BASE" -H "$AUTH" -H "Mcp-Session-Id: $SID" -H "$CT" -H "$ACCEPT" \
+            -d '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"create_xlsx","arguments":{"data":[["name","qty"],["apple",3]]}},"id":3}')"
+          echo "$created" | grep -q 's3_key' || { echo 'create_xlsx returned no s3_key'; echo "$created"; exit 1; }
+
+          # sheet_read on the created key (extract it from the SSE response)
+          KEY="$(echo "$created" | sed -n 's/^data://p' \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["result"]["content"][0]["text"])' \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["s3_key"])')"
+          readback="$(curl -sf -X POST "$BASE" -H "$AUTH" -H "Mcp-Session-Id: $SID" -H "$CT" -H "$ACCEPT" \
+            -d "{\"jsonrpc\":\"2.0\",\"method\":\"tools/call\",\"params\":{\"name\":\"sheet_read\",\"arguments\":{\"s3_key\":\"${KEY}\"}},\"id\":4}")"
+          echo "$readback" | grep -q 'apple' || { echo 'sheet_read round-trip failed'; echo "$readback"; exit 1; }
+
+          # sheet_apply: edit the created workbook into a new key
+          # (cell edit field is "address", not "cell")
+          applied="$(curl -sf -X POST "$BASE" -H "$AUTH" -H "Mcp-Session-Id: $SID" -H "$CT" -H "$ACCEPT" \
+            -d "{\"jsonrpc\":\"2.0\",\"method\":\"tools/call\",\"params\":{\"name\":\"sheet_apply\",\"arguments\":{\"s3_key\":\"${KEY}\",\"cells\":[{\"address\":\"C2\",\"value\":\"fresh\"}],\"output_key\":\"excel-mcp-out/edited.xlsx\"}},\"id\":5}")"
+          echo "$applied" | grep -q 'excel-mcp-out/edited.xlsx' || { echo 'sheet_apply failed'; echo "$applied"; exit 1; }
+
+          # Bad key is rejected: rmcp surfaces tool errors as JSON-RPC error
+          # objects ({"error":{...}}), not isError:true results — accept either.
+          bad="$(curl -sf -X POST "$BASE" -H "$AUTH" -H "Mcp-Session-Id: $SID" -H "$CT" -H "$ACCEPT" \
+            -d '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"sheet_read","arguments":{"s3_key":"../etc/passwd"}},"id":6}')"
+          if echo "$bad" | grep -q '"isError"[^,]*true' || echo "$bad" | grep -q '"error"'; then
+            echo 'bad key rejected: OK'
+          else
+            echo 'traversal key should fail'; echo "$bad"; exit 1
+          fi
+
+  package:
+    runs-on: ubuntu-latest
+    needs: test
+    strategy:
+      matrix:
+        include:
+          - arch: amd64
+          - arch: arm64
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up cross-compiler (arm64)
+        if: matrix.arch == 'arm64'
+        run: |
+          sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
+          rustup target add aarch64-unknown-linux-gnu
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: package-${{ matrix.arch }}
+      - name: Check version matches tag
+        run: |
+          tag_version="${GITHUB_REF_NAME#v}"
+          pkg_version="$(grep -m1 '^version' Cargo.toml | sed 's/version *= *"\(.*\)"/\1/')"
+          if [ "${tag_version}" != "${pkg_version}" ]; then
+            echo "Tag v${tag_version} does not match Cargo.toml version ${pkg_version}"
+            exit 1
+          fi
+      - name: Build release binary
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+        run: |
+          if [ "${{ matrix.arch }}" = "arm64" ]; then
+            cargo build --release --target aarch64-unknown-linux-gnu
+            cp target/aarch64-unknown-linux-gnu/release/excel-mcp excel-mcp-linux-arm64
+          else
+            cargo build --release
+            cp target/release/excel-mcp excel-mcp-linux-amd64
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-bin-linux-${{ matrix.arch }}
+          path: excel-mcp-linux-${{ matrix.arch }}
+          if-no-files-found: error
+
+  publish:
+    runs-on: ubuntu-latest
+    needs: [image, package, smoke]
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          pattern: release-*
+          merge-multiple: true
+      - name: Create checksum file
+        working-directory: release-assets
+        run: |
+          rm -f checksums.txt
+          find . -type f ! -name "checksums.txt" -print0 | sort -z | xargs -0 sha256sum > checksums.txt
+          cat checksums.txt
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: release-assets/*
+          generate-release-notes: true
