@@ -12,8 +12,9 @@ mod tests {
         let raw = b"hello xlsx";
         let encoded = super::base64_encode(raw);
         use base64::Engine;
-        let decoded =
-            base64::engine::general_purpose::STANDARD.decode(encoded).unwrap();
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .unwrap();
         assert_eq!(decoded, raw);
     }
 }
