@@ -86,7 +86,9 @@ jobs:
         run: |
           TAG="${GITHUB_REF_NAME}"
           docker load < image/excel-mcp-image-linux-amd64.tar.gz
-          docker run -d --rm \
+          # No --rm: keep the container on failure so docker logs below can
+          # show the crash (the ephemeral runner handles cleanup either way).
+          docker run -d \
             --name excel-mcp-smoke \
             --add-host=host.docker.internal:host-gateway \
             -e MCP_AUTH_KEY=smoke-key \
@@ -104,7 +106,12 @@ jobs:
             fi
             sleep 1
           done
-          curl -sf http://127.0.0.1:8124/health | grep -q '"ok"'
+          if ! curl -sf http://127.0.0.1:8124/health | grep -q '"ok"'; then
+            echo '=== health never became OK; container logs: ==='
+            docker logs excel-mcp-smoke || true
+            docker inspect excel-mcp-smoke --format 'exit code: {{.State.ExitCode}} ({{.State.Error}})' || true
+            exit 1
+          fi
       - name: Seed the S3 backend and smoke-test the MCP surface
         # Responses arrive as text/event-stream frames ("data: <json>");
         # `sed -n 's/^data://p'` unwraps them for python. A second session

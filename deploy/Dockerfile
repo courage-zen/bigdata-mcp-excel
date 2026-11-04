@@ -1,7 +1,7 @@
 # excel-mcp container image.
 # Built in CI for linux/amd64 and linux/arm64; also buildable locally:
 #   docker build -t excel-mcp -f deploy/Dockerfile .
-FROM lukemathwalker/cargo-chef:latest-rust-1 AS chef
+FROM lukemathwalker/cargo-chef:latest-rust-1-bookworm AS chef
 WORKDIR /app
 
 FROM chef AS planner
