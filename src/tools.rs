@@ -5,7 +5,7 @@ use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::*;
 use rmcp::tool;
 use rmcp::{tool_handler, tool_router};
-use rmcp::{ErrorData as McpError, RoleServer, ServerHandler};
+use rmcp::{ErrorData as McpError, ServerHandler};
 use schemars::JsonSchema;
 use serde::Deserialize;
 
@@ -28,6 +28,25 @@ pub struct CreateXlsxArgs {
     /// generated under S3_OUTPUT_PREFIX.
     #[serde(default)]
     pub output_key: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SheetReadArgs {
+    /// S3 key of the workbook to read.
+    pub s3_key: String,
+    /// Sheet name or 0-based index as string; default: first sheet.
+    #[serde(default)]
+    pub sheet: Option<String>,
+    /// Row limit; extra rows are dropped and `truncated` is set.
+    #[serde(default = "default_max_rows")]
+    pub max_rows: usize,
+    /// "json" (default) returns the full struct; "markdown" returns a table.
+    #[serde(default)]
+    pub format: Option<String>,
+}
+
+fn default_max_rows() -> usize {
+    500
 }
 
 #[tool_router]
@@ -94,6 +113,46 @@ impl ExcelMcp {
         Ok(CallToolResult::success(vec![ContentBlock::text(
             obj.to_string(),
         )]))
+    }
+
+    #[tool(
+        description = "Read one sheet of an .xlsx workbook from S3: returns sheet list, cells (A1-keyed values plus formulas), merged ranges and a truncation flag. Values are recomputed with a formula engine when possible, else cached values are returned (values_are_cached=true)."
+    )]
+    async fn sheet_read(
+        &self,
+        Parameters(args): Parameters<SheetReadArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let s3 = self.cfg.s3.clone().ok_or_else(|| {
+            McpError::internal_error(
+                "S3 output is not configured on this server; ask the operator to set S3_BUCKET and credentials",
+                None,
+            )
+        })?;
+        crate::s3keys::validate_input_key(&args.s3_key, &s3)
+            .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+        let store = crate::storage::client(&s3)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        let store: Box<dyn object_store::ObjectStore> = Box::new(store);
+        let max = self.cfg.max_file_bytes;
+        let tmp = crate::storage::fetch_to_tempfile(store.as_ref(), &args.s3_key, max)
+            .await
+            .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+
+        let sheet = args.sheet.clone();
+        let max_rows = args.max_rows;
+        let result = tokio::task::spawn_blocking(move || {
+            crate::engine::read::read_sheet(tmp.as_path(), sheet.as_deref(), max_rows)
+        })
+        .await
+        .map_err(|_| McpError::internal_error("engine task failed", None))?
+        .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+
+        let text = match args.format.as_deref() {
+            Some("markdown") => crate::engine::read::to_markdown(&result),
+            _ => serde_json::to_string(&result)
+                .map_err(|e| McpError::internal_error(e.to_string(), None))?,
+        };
+        Ok(CallToolResult::success(vec![ContentBlock::text(text)]))
     }
 }
 
@@ -195,6 +254,44 @@ mod tests {
         assert!(
             msg.contains(".xlsx"),
             "expected output-key rejection, got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn sheet_read_rejects_dangerous_key() {
+        // Path-traversal keys must be rejected before any S3 call.
+        let mut cfg = test_cfg();
+        cfg.s3 = Some(crate::config::S3Config {
+            bucket: "b".into(),
+            region: "us-east-1".into(),
+            access_key_id: "ak".into(),
+            secret_access_key: "sk".into(),
+            endpoint_url: "http://127.0.0.1:1".into(),
+            use_path_style: true,
+            allowed_key_prefixes: vec![],
+        });
+        let server = ExcelMcp::new(cfg);
+        let result = server
+            .sheet_read(Parameters(SheetReadArgs {
+                s3_key: "../etc/passwd".into(),
+                sheet: None,
+                max_rows: 500,
+                format: None,
+            }))
+            .await;
+        let msg = match result {
+            Err(e) => e.message.to_string(),
+            Ok(r) => {
+                if r.is_error.unwrap_or(false) {
+                    extract_text(&r).unwrap_or_default()
+                } else {
+                    String::new()
+                }
+            }
+        };
+        assert!(
+            msg.contains("..") || msg.contains("key"),
+            "expected input-key rejection, got: {msg}"
         );
     }
 }

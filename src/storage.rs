@@ -11,8 +11,6 @@ use crate::config::S3Config;
 
 #[derive(Debug, thiserror::Error)]
 pub enum StorageError {
-    #[error("storage is not configured on this server; ask the operator to set S3_BUCKET and credentials")]
-    NotConfigured,
     #[error("file not found or not accessible")]
     NotFound,
     #[error("download exceeded the {0} byte limit")]
