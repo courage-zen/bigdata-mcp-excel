@@ -49,6 +49,24 @@ fn default_max_rows() -> usize {
     500
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SheetApplyArgs {
+    /// S3 key of the source workbook. Never modified.
+    pub s3_key: String,
+    /// S3 key for the edited copy (required, must end with .xlsx).
+    pub output_key: String,
+    /// Default sheet for cell edits (name); default: first sheet.
+    #[serde(default)]
+    pub sheet: Option<String>,
+    /// Cell edits: {address: "B3", value: ...}; "=" strings are formulas,
+    /// null clears the cell.
+    #[serde(default)]
+    pub cells: Vec<crate::engine::apply::CellEdit>,
+    /// Structural operations, applied after cell edits.
+    #[serde(default)]
+    pub ops: Vec<crate::engine::apply::WorkbookOp>,
+}
+
 #[tool_router]
 impl ExcelMcp {
     pub fn new(cfg: Config) -> Self {
@@ -153,6 +171,72 @@ impl ExcelMcp {
                 .map_err(|e| McpError::internal_error(e.to_string(), None))?,
         };
         Ok(CallToolResult::success(vec![ContentBlock::text(text)]))
+    }
+
+    #[tool(
+        description = "Edit an .xlsx workbook from S3 and write a new copy: set cell values/formulas, insert rows/columns, add or rename sheets. The source object is never modified. Requires an explicit output_key ending in .xlsx."
+    )]
+    async fn sheet_apply(
+        &self,
+        Parameters(args): Parameters<SheetApplyArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let s3 = self.cfg.s3.clone().ok_or_else(|| {
+            McpError::internal_error(
+                "S3 output is not configured on this server; ask the operator to set S3_BUCKET and credentials",
+                None,
+            )
+        })?;
+        crate::s3keys::validate_input_key(&args.s3_key, &s3)
+            .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+        let output_key = crate::s3keys::normalize_output_key(&args.output_key)
+            .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+        let store = crate::storage::client(&s3)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        let store: Box<dyn object_store::ObjectStore> = Box::new(store);
+        let max = self.cfg.max_file_bytes;
+        let tmp = crate::storage::fetch_to_tempfile(store.as_ref(), &args.s3_key, max)
+            .await
+            .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+
+        let sheet = args.sheet.clone();
+        let cells = args.cells;
+        let ops = args.ops;
+        let ops_count = ops.len();
+        let (edited_bytes, applied) = tokio::task::spawn_blocking(move || {
+            let dst = tempfile::NamedTempFile::new()
+                .map_err(|e| crate::engine::apply::ApplyError::Open(e.to_string()))?;
+            let applied = crate::engine::apply::apply_edits(
+                tmp.as_path(),
+                dst.path(),
+                sheet.as_deref(),
+                &cells,
+                &ops,
+            )?;
+            std::fs::read(dst.path()).map_err(|e| crate::engine::apply::ApplyError::Open(e.to_string()))
+                .map(|b| (b, applied))
+        })
+        .await
+        .map_err(|_| McpError::internal_error("engine task failed", None))?
+        .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+
+        if edited_bytes.len() as u64 > max {
+            return Err(McpError::internal_error(
+                format!("output exceeds the {max} byte limit"),
+                None,
+            ));
+        }
+        crate::storage::upload_bytes(store.as_ref(), &output_key, edited_bytes)
+            .await
+            .map_err(|_| McpError::internal_error("upload failed", None))?;
+
+        let obj = serde_json::json!({
+            "s3_key": output_key,
+            "cells_edited": applied,
+            "ops_applied": ops_count,
+        });
+        Ok(CallToolResult::success(vec![ContentBlock::text(
+            obj.to_string(),
+        )]))
     }
 }
 
