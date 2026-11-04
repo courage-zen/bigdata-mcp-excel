@@ -5,7 +5,7 @@ use std::path::Path;
 
 use object_store::aws::AmazonS3Builder;
 use object_store::path::Path as StorePath;
-use object_store::{ObjectStore, PutPayload};
+use object_store::{ObjectStore, ObjectStoreExt, PutPayload};
 
 use crate::config::S3Config;
 
@@ -69,7 +69,7 @@ pub async fn fetch_to_tempfile(
         object_store::Error::NotFound { .. } => StorageError::NotFound,
         _ => StorageError::Failed,
     })?;
-    let size = get.meta().size;
+    let size = get.meta.size;
     if size > max_bytes {
         return Err(StorageError::TooLarge(max_bytes));
     }
@@ -120,6 +120,7 @@ pub async fn upload_bytes(
     store
         .put(&store_path(key), PutPayload::from_bytes(bytes.into()))
         .await
+        .map(|_| ())
         .map_err(|_| StorageError::Failed)
 }
 
