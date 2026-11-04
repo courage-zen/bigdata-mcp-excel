@@ -1,4 +1,6 @@
 mod config;
+mod s3keys;
+mod storage;
 
 fn main() -> anyhow::Result<()> {
     let cfg = config::Config::from_env();
