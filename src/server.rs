@@ -2,10 +2,10 @@
 //! behind the auth layer; /health exempt from auth.
 
 use axum::Json;
+use axum::Router;
 use axum::extract::State;
 use axum::middleware::from_fn_with_state;
 use axum::routing::get;
-use axum::Router;
 use serde_json::json;
 
 use crate::auth::require_auth;
@@ -56,7 +56,12 @@ mod tests {
     async fn health_is_exempt_from_auth() {
         let app = router(test_config(), None);
         let resp = app
-            .oneshot(Request::builder().uri("/health").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);

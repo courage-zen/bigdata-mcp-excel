@@ -52,10 +52,7 @@ pub fn parse_data(data: &serde_json::Value) -> Result<Vec<SheetData>, CreateErro
                     };
                     parsed.push(cells.clone());
                 }
-                out.push(SheetData {
-                    name,
-                    rows: parsed,
-                });
+                out.push(SheetData { name, rows: parsed });
             }
             Ok(out)
         }
@@ -94,9 +91,7 @@ pub fn build_xlsx(sheets: &[SheetData]) -> Result<Vec<u8>, CreateError> {
             }
         }
     }
-    workbook
-        .save_to_buffer()
-        .map_err(|_| CreateError::Write)
+    workbook.save_to_buffer().map_err(|_| CreateError::Write)
 }
 
 fn write_cell(
@@ -110,21 +105,36 @@ fn write_cell(
     match value {
         serde_json::Value::Number(n) => {
             let f = n.as_f64().unwrap_or(0.0);
-            worksheet.write_number(row, col, f).map(|_| ()).map_err(map_err)
+            worksheet
+                .write_number(row, col, f)
+                .map(|_| ())
+                .map_err(map_err)
         }
-        serde_json::Value::Bool(b) => worksheet.write_boolean(row, col, *b).map(|_| ()).map_err(map_err),
+        serde_json::Value::Bool(b) => worksheet
+            .write_boolean(row, col, *b)
+            .map(|_| ())
+            .map_err(map_err),
         serde_json::Value::String(s) => {
             if s.starts_with('=') {
-                worksheet.write_formula(row, col, s.as_str()).map(|_| ()).map_err(map_err)
+                worksheet
+                    .write_formula(row, col, s.as_str())
+                    .map(|_| ())
+                    .map_err(map_err)
             } else {
-                worksheet.write_string(row, col, s.as_str()).map(|_| ()).map_err(map_err)
+                worksheet
+                    .write_string(row, col, s.as_str())
+                    .map(|_| ())
+                    .map_err(map_err)
             }
         }
         serde_json::Value::Null => Ok(()),
         // objects/arrays in cells: stringify, matching lenient tool input
         other => {
             let text = serde_json::to_string(other).unwrap_or_default();
-            worksheet.write_string(row, col, text).map(|_| ()).map_err(map_err)
+            worksheet
+                .write_string(row, col, text)
+                .map(|_| ())
+                .map_err(map_err)
         }
     }
 }
@@ -173,11 +183,7 @@ mod tests {
 
     #[test]
     fn build_reads_back_with_calamine() {
-        let sheets = parse_data(&json!([
-            ["name", "qty"],
-            ["apple", 3],
-        ]))
-        .unwrap();
+        let sheets = parse_data(&json!([["name", "qty"], ["apple", 3],])).unwrap();
         let bytes = build_xlsx(&sheets).unwrap();
         assert!(!bytes.is_empty());
         assert_eq!(&bytes[0..2], b"PK");

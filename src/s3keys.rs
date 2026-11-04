@@ -31,7 +31,10 @@ pub fn validate_input_key(key: &str, s3: &S3Config) -> Result<String, InvalidKey
     if key.contains('\\') || key.contains("//") {
         return Err(InvalidKey("key must be a plain '/'-separated path".into()));
     }
-    if key.split('/').any(|seg| seg.is_empty() || seg == "." || seg == "..") {
+    if key
+        .split('/')
+        .any(|seg| seg.is_empty() || seg == "." || seg == "..")
+    {
         return Err(InvalidKey(
             "key must not contain '.', '..' or empty segments".into(),
         ));
@@ -63,11 +66,11 @@ pub fn normalize_output_key(key: &str) -> Result<String, InvalidKey> {
     if key.starts_with('/')
         || key.contains('\\')
         || key.contains("//")
-        || key.split('/').any(|seg| seg.is_empty() || seg == "." || seg == "..")
+        || key
+            .split('/')
+            .any(|seg| seg.is_empty() || seg == "." || seg == "..")
     {
-        return Err(InvalidKey(
-            "key must be a plain '/'-separated path".into(),
-        ));
+        return Err(InvalidKey("key must be a plain '/'-separated path".into()));
     }
     let lower = key.to_lowercase();
     if DANGEROUS_EXTENSIONS.iter().any(|ext| lower.ends_with(ext)) {
