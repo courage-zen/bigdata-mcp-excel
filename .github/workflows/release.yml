@@ -25,24 +25,27 @@ jobs:
         run: cargo test
 
   image:
-    runs-on: ubuntu-latest
+    # Native runners per arch: ubuntu-24.04-arm is free for public repos and
+    # builds arm64 at full speed (~4 min) instead of emulating through QEMU
+    # (~50 min, roughly 10x slowdown on ~280 dependency crates).
+    runs-on: ${{ matrix.runner }}
     needs: test
     strategy:
       matrix:
         include:
           - arch: amd64
+            runner: ubuntu-latest
           - arch: arm64
+            runner: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
-      - name: Set up QEMU (arm64 emulation)
-        uses: docker/setup-qemu-action@v3
-        with:
-          platforms: arm64
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
       - name: Build image (linux/${{ matrix.arch }})
         run: |
           TAG="${GITHUB_REF_NAME}"
+          # Build for the runner's own arch (no emulation): the platform flag
+          # must match the native kernel, so pass it straight through.
           docker buildx build \
             --platform "linux/${{ matrix.arch }}" \
             --tag "excel-mcp:${TAG}" \
