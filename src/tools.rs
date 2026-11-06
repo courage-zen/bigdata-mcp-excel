@@ -143,13 +143,13 @@ impl ExcelMcp {
                 None,
             )
         })?;
-        crate::s3keys::validate_input_key(&args.s3_key, &s3)
+        let resolved_key = crate::s3keys::resolve_input(&args.s3_key, &s3)
             .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
         let store = crate::storage::client(&s3)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         let store: Box<dyn object_store::ObjectStore> = Box::new(store);
         let max = self.cfg.max_file_bytes;
-        let tmp = crate::storage::fetch_to_tempfile(store.as_ref(), &args.s3_key, max)
+        let tmp = crate::storage::fetch_to_tempfile(store.as_ref(), &resolved_key, max)
             .await
             .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
 
@@ -183,7 +183,7 @@ impl ExcelMcp {
                 None,
             )
         })?;
-        crate::s3keys::validate_input_key(&args.s3_key, &s3)
+        let resolved_key = crate::s3keys::resolve_input(&args.s3_key, &s3)
             .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
         let output_key = crate::s3keys::normalize_output_key(&args.output_key)
             .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
@@ -191,7 +191,7 @@ impl ExcelMcp {
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         let store: Box<dyn object_store::ObjectStore> = Box::new(store);
         let max = self.cfg.max_file_bytes;
-        let tmp = crate::storage::fetch_to_tempfile(store.as_ref(), &args.s3_key, max)
+        let tmp = crate::storage::fetch_to_tempfile(store.as_ref(), &resolved_key, max)
             .await
             .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
 
@@ -374,6 +374,74 @@ mod tests {
         assert!(
             msg.contains("..") || msg.contains("key"),
             "expected input-key rejection, got: {msg}"
+        );
+    }
+
+    /// S3 config for tools-level URL tests: unreachable endpoint so any
+    /// network attempt fails AFTER key validation, proving the URL was
+    /// accepted and converted.
+    fn url_cfg() -> Config {
+        Config {
+            host: "127.0.0.1".into(),
+            port: 0,
+            auth_keys: vec![],
+            s3: Some(crate::config::S3Config {
+                bucket: "uploads".into(),
+                region: "us-east-1".into(),
+                access_key_id: "ak".into(),
+                secret_access_key: "sk".into(),
+                endpoint_url: "http://127.0.0.1:1".into(),
+                use_path_style: true,
+                allowed_key_prefixes: vec![],
+            }),
+            output_prefix: "excel-mcp-out/".into(),
+            inline_max_bytes: 1024,
+            max_file_bytes: 1024,
+        }
+    }
+
+    #[tokio::test]
+    async fn sheet_read_accepts_url_and_passes_validation() {
+        // The URL converts to key "workspaces/a.xlsx"; validation passes
+        // (no allowlist configured); the S3 fetch itself fails because the
+        // endpoint is unreachable — but with a fetch error, NOT a key error.
+        let server = ExcelMcp::new(url_cfg());
+        let result = server
+            .sheet_read(Parameters(SheetReadArgs {
+                s3_key: "http://127.0.0.1:1/uploads/workspaces/a.xlsx".into(),
+                sheet: None,
+                max_rows: 500,
+                format: None,
+            }))
+            .await;
+        let msg = match &result {
+            Err(e) => e.message.to_string(),
+            Ok(r) => extract_text(r).unwrap_or_default(),
+        };
+        assert!(
+            !msg.contains("does not match bucket") && !msg.contains("no object key"),
+            "URL should have been accepted, got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn sheet_read_rejects_url_with_traversal() {
+        let server = ExcelMcp::new(url_cfg());
+        let result = server
+            .sheet_read(Parameters(SheetReadArgs {
+                s3_key: "http://127.0.0.1:1/uploads/../etc/passwd".into(),
+                sheet: None,
+                max_rows: 500,
+                format: None,
+            }))
+            .await;
+        let msg = match &result {
+            Err(e) => e.message.to_string(),
+            Ok(r) => extract_text(r).unwrap_or_default(),
+        };
+        assert!(
+            msg.contains("invalid s3 key"),
+            "traversal in URL must be rejected as a key error, got: {msg}"
         );
     }
 }
