@@ -90,7 +90,7 @@ Environment variables (see `.env.example` for the full annotated list):
 | `EXCEL_MAX_FILE_BYTES` | `104857600` | upload/download cap (100 MiB) |
 
 - `/health` is auth-exempt and returns `{"ok":true,"s3":"configured",
-  "version":"0.1.2"}` — the `s3` field tells you whether the S3 env is
+  "version":"0.1.3"}` — the `s3` field tells you whether the S3 env is
   complete.
 - `/mcp` requires `Authorization: Bearer <key>` when `MCP_AUTH_KEY` is set.
 - The MCP endpoint follows the Streamable HTTP transport: `initialize`,
@@ -117,6 +117,13 @@ docker run -p 8080:8080 -e MCP_AUTH_KEY=dev-key \
   excel-mcp
 ```
 
+The runtime image is distroless (`cc-debian12:nonroot`): it ships CA
+certificates, glibc and nothing else — no shell, so `kubectl exec -it … --
+/bin/sh` won't work; use `kubectl logs` or a port-forward plus
+`curl /health` instead. Local builds need network access to gcr.io for
+the distroless base (CI builds it directly). The server runs as the
+nonroot user (uid 65532).
+
 Integration tests (`--ignored`) spin up MinIO via testcontainers and run the
 full create→read→apply round trip:
 
@@ -142,8 +149,8 @@ agent 远程调用。所有文件 IO 走 S3（推荐同集群 MinIO）：agent �
 
 ```bash
 # 1. 构建并推送镜像（或从 GitHub Release 下载 tarball 后 docker load）
-docker build -t <registry>/excel-mcp:0.1.2 -f deploy/Dockerfile .
-docker push <registry>/excel-mcp:0.1.2
+docker build -t <registry>/excel-mcp:0.1.3 -f deploy/Dockerfile .
+docker push <registry>/excel-mcp:0.1.3
 
 # 2. 创建认证与 S3 凭证 secret
 kubectl create secret generic excel-mcp-auth \
