@@ -32,7 +32,8 @@ pub struct CreateXlsxArgs {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct SheetReadArgs {
-    /// S3 key of the workbook to read.
+    /// S3 key of the workbook to read, or the full object-store URL of an
+    /// attachment (converted to a key automatically).
     pub s3_key: String,
     /// Sheet name or 0-based index as string; default: first sheet.
     #[serde(default)]
@@ -51,7 +52,8 @@ fn default_max_rows() -> usize {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct SheetApplyArgs {
-    /// S3 key of the source workbook. Never modified.
+    /// S3 key of the source workbook, or its full object-store URL
+    /// (converted to a key automatically). Never modified.
     pub s3_key: String,
     /// S3 key for the edited copy (required, must end with .xlsx).
     pub output_key: String,
@@ -74,7 +76,7 @@ impl ExcelMcp {
     }
 
     #[tool(
-        description = "Create a new Excel (.xlsx) workbook from data: a 2-D array of cell values, or {\"sheets\":[{\"name\",\"rows\"}]} for several sheets. Strings starting with \"=\" are formulas. Returns the output s3_key and the file bytes base64-encoded when small."
+        description = "Create a new Excel (.xlsx) workbook from data: a 2-D array of cell values, or {\"sheets\":[{\"name\",\"rows\"}]} for several sheets. Strings starting with \"=\" are formulas. Prefer this over emitting CSV/markdown tables when the deliverable is a real spreadsheet. Returns the output s3_key and the file bytes base64-encoded when small."
     )]
     async fn create_xlsx(
         &self,
@@ -131,7 +133,7 @@ impl ExcelMcp {
     }
 
     #[tool(
-        description = "Read one sheet of an .xlsx workbook from S3: returns sheet list, cells (A1-keyed values plus formulas), merged ranges and a truncation flag. Values are recomputed with a formula engine when possible, else cached values are returned (values_are_cached=true)."
+        description = "Read one sheet of an .xlsx workbook from S3. Use this whenever you need data from an Excel file, including platform attachments whose URL points at the object store: pass the attachment's URL or its S3 key as s3_key (URLs are converted to keys automatically). Do NOT download attachments or parse xlsx files locally. Returns sheet list, cells (A1-keyed values plus formulas), merged ranges and a truncation flag. Values are recomputed with a formula engine when possible, else cached values are returned (values_are_cached=true)."
     )]
     async fn sheet_read(
         &self,
@@ -171,7 +173,7 @@ impl ExcelMcp {
     }
 
     #[tool(
-        description = "Edit an .xlsx workbook from S3 and write a new copy: set cell values/formulas, insert rows/columns, add or rename sheets. The source object is never modified. Requires an explicit output_key ending in .xlsx."
+        description = "Edit an .xlsx workbook from S3 and write a new copy: set cell values/formulas, insert rows/columns, add or rename sheets. The source object is never modified. Pass the source workbook's URL or S3 key as s3_key (URLs are converted to keys automatically); output_key must be an S3 key ending in .xlsx."
     )]
     async fn sheet_apply(
         &self,
@@ -243,9 +245,12 @@ impl ServerHandler for ExcelMcp {
     fn get_info(&self) -> ServerConfig {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_instructions(
-                "Excel workbook tools over S3. create_xlsx builds a new .xlsx from data; \
+                "Excel workbook tools over S3 — use them instead of parsing xlsx files yourself. \
                  sheet_read returns cells, formulas and recomputed values for one sheet; \
-                 sheet_apply edits an existing workbook and writes a new copy.",
+                 sheet_apply edits an existing workbook and writes a new copy; \
+                 create_xlsx builds a new .xlsx from data. All inputs are S3 keys, but full \
+                 object-store URLs (e.g. platform attachment URLs) are accepted and converted \
+                 automatically — do not download attachments to parse them locally.",
             )
             .with_server_info(Implementation::new(
                 env!("CARGO_PKG_NAME"),
