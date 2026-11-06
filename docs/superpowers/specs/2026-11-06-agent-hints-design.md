@@ -77,8 +77,8 @@ New function `resolve_input(raw: &str, s3: &S3Config) -> Result<String, InvalidK
   `validate_input_key` today (plain key path unchanged).
 - Otherwise parse the URL with a small hand-rolled splitter (scheme, host,
   path; query string dropped) — no new crates:
-  1. Split off `://`, take the remainder, split at the first `/` → host,
-     rest-of-path.
+  1. Drop `?<query>` first, then split off `scheme://`, take the remainder,
+     split at the first `/` → host, rest-of-path.
   2. **Virtual-host style**: if the host starts with `<bucket>.` (the
      configured bucket), the path minus leading `/` is the key.
   3. **Path style**: the path minus leading `/` is `bucket/key`; strip the
@@ -87,6 +87,8 @@ New function `resolve_input(raw: &str, s3: &S3Config) -> Result<String, InvalidK
   4. Percent-decoding is not applied — S3 keys with spaces/unicode arrive
      percent-encoded and MinIO accepts the encoded form; decoding risks
      reintroducing `/` or `..` from `%2F`/`%2E`. (Keys stay byte-exact.)
+  5. If no path remains after the host (bare `http://host:9000`), error:
+     "URL contains no object key".
 - The extracted key then passes through `validate_input_key` unchanged:
   traversal segments, dangerous extensions, allowlist prefixes. A traversal
   smuggled via URL (`http://h/bucket/../etc/passwd`) is caught here.
