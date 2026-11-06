@@ -419,7 +419,9 @@ mod tests {
             Ok(r) => extract_text(r).unwrap_or_default(),
         };
         assert!(
-            !msg.contains("does not match bucket") && !msg.contains("no object key"),
+            !msg.contains("does not match bucket")
+                && !msg.contains("no object key")
+                && !msg.contains("invalid s3 key"),
             "URL should have been accepted, got: {msg}"
         );
     }
@@ -442,6 +444,33 @@ mod tests {
         assert!(
             msg.contains("invalid s3 key"),
             "traversal in URL must be rejected as a key error, got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn sheet_apply_accepts_url_and_passes_validation() {
+        // Mirror of the sheet_read accept test: the URL converts to a key,
+        // validation passes, and the failure (if any) comes from the
+        // unreachable endpoint — not from key rejection.
+        let server = ExcelMcp::new(url_cfg());
+        let result = server
+            .sheet_apply(Parameters(SheetApplyArgs {
+                s3_key: "http://127.0.0.1:1/uploads/workspaces/a.xlsx".into(),
+                output_key: "out/a.xlsx".into(),
+                sheet: None,
+                cells: vec![],
+                ops: vec![],
+            }))
+            .await;
+        let msg = match &result {
+            Err(e) => e.message.to_string(),
+            Ok(r) => extract_text(r).unwrap_or_default(),
+        };
+        assert!(
+            !msg.contains("does not match bucket")
+                && !msg.contains("no object key")
+                && !msg.contains("invalid s3 key"),
+            "URL should have been accepted, got: {msg}"
         );
     }
 }
