@@ -77,7 +77,7 @@ pub fn resolve_input(raw: &str, s3: &S3Config) -> Result<String, InvalidKey> {
             return Err(InvalidKey(format!(
                 "URL contains no object key (got '{raw}'); pass 's3_key' as a key or a URL like http://<endpoint>/{}/<key>",
                 s3.bucket
-            )))
+            )));
         }
     };
     // Virtual-host style: host is "<bucket>.<endpoint-domain>".
@@ -86,6 +86,13 @@ pub fn resolve_input(raw: &str, s3: &S3Config) -> Result<String, InvalidKey> {
     {
         return validate_input_key(path, s3);
     }
+    // Bucket-only or trailing-slash URL: segment matches, but no key.
+    if path == s3.bucket || path == format!("{}/", s3.bucket) {
+        return Err(InvalidKey(format!(
+            "URL contains no object key (got '{raw}'); pass 's3_key' as a key or a URL like http://<endpoint>/{}/<key>",
+            s3.bucket
+        )));
+    }
     // Path style: first path segment is the bucket.
     let key = match path.strip_prefix(&format!("{}/", s3.bucket)) {
         Some(key) => key,
@@ -93,7 +100,7 @@ pub fn resolve_input(raw: &str, s3: &S3Config) -> Result<String, InvalidKey> {
             return Err(InvalidKey(format!(
                 "URL host or first path segment does not match bucket '{}' (got '{raw}'); expected http://<endpoint>/{}/<key>",
                 s3.bucket, s3.bucket
-            )))
+            )));
         }
     };
     validate_input_key(key, s3)
@@ -226,8 +233,7 @@ mod tests {
         // MinIO in-cluster form: endpoint + bucket + key in the path.
         let cfg = url_s3();
         assert_eq!(
-            resolve_input("http://minio:9000/uploads/workspaces/a/b.xlsx", &cfg)
-                .unwrap(),
+            resolve_input("http://minio:9000/uploads/workspaces/a/b.xlsx", &cfg).unwrap(),
             "workspaces/a/b.xlsx"
         );
     }
@@ -251,8 +257,7 @@ mod tests {
         // bucket.endpoint host: path starts directly at the key.
         let cfg = url_s3();
         assert_eq!(
-            resolve_input("https://uploads.s3.amazonaws.com/workspaces/a/b.xlsx", &cfg)
-                .unwrap(),
+            resolve_input("https://uploads.s3.amazonaws.com/workspaces/a/b.xlsx", &cfg).unwrap(),
             "workspaces/a/b.xlsx"
         );
     }
@@ -262,6 +267,23 @@ mod tests {
         // Traversal smuggled in the URL path is caught by validate_input_key.
         let cfg = url_s3();
         assert!(resolve_input("http://minio:9000/uploads/../etc/passwd", &cfg).is_err());
+    }
+
+    #[test]
+    fn resolve_virtual_host_url_still_enforces_key_rules() {
+        // A traversal smuggled in the virtual-host URL path must be caught
+        // by validate_input_key, same as the path-style branch.
+        let cfg = url_s3();
+        assert!(resolve_input("https://uploads.s3.amazonaws.com/../etc/passwd", &cfg).is_err());
+    }
+
+    #[test]
+    fn resolve_bucket_only_url_has_no_key() {
+        let cfg = url_s3();
+        for url in ["http://minio:9000/uploads", "http://minio:9000/uploads/"] {
+            let err = resolve_input(url, &cfg).unwrap_err().to_string();
+            assert!(err.contains("no object key"), "for {url} got: {err}");
+        }
     }
 
     #[test]
@@ -277,7 +299,9 @@ mod tests {
     #[test]
     fn resolve_bare_host_url_has_no_key() {
         let cfg = url_s3();
-        let err = resolve_input("http://minio:9000", &cfg).unwrap_err().to_string();
+        let err = resolve_input("http://minio:9000", &cfg)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("no object key"), "message: {err}");
     }
 }
