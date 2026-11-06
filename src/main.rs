@@ -28,10 +28,29 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(host = %cfg.host, port = cfg.port, s3 = s3_status, "excel-mcp starting");
     let cfg_for_sessions = cfg.clone();
 
+    // rmcp's DNS-rebinding guard rejects requests whose Host header is not in
+    // the allowlist; the default is localhost/127.0.0.1/::1, which blocks
+    // in-cluster clients (Host: excel-mcp.ns.svc...). MCP_ALLOWED_HOSTS
+    // overrides it; empty = allow any host (auth still applies via Bearer).
+    let allowed_hosts = std::env::var("MCP_ALLOWED_HOSTS")
+        .map(|v| {
+            v.split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let server_config = if allowed_hosts.is_empty() {
+        StreamableHttpServerConfig::default().disable_allowed_hosts()
+    } else {
+        StreamableHttpServerConfig::default().with_allowed_hosts(allowed_hosts)
+    };
+
     let service = StreamableHttpService::new(
         move || Ok(tools::ExcelMcp::new(cfg_for_sessions.clone())),
         LocalSessionManager::default().into(),
-        StreamableHttpServerConfig::default(),
+        server_config,
     );
     let mcp_router = axum::Router::new().nest_service("/mcp", service);
     let app = server::router(cfg, Some(mcp_router));
