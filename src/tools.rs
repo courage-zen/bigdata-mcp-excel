@@ -158,7 +158,12 @@ async fn create_xlsx_inner(
     )
     .await
     .map_err(|_| ToolError::EngineTimeout)?
-    .map_err(|_| ToolError::Internal("engine task failed".into()))?
+    .map_err(|e| {
+        // The panic payload carries the engine failure cause (e.g. an
+        // index-out-of-bounds); log it server-side, keep the wire fixed.
+        tracing::warn!(error = %e, "engine task failed");
+        ToolError::Internal("engine task failed".into())
+    })?
     .map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
     let s3 = server.cfg.s3.clone().ok_or(ToolError::S3Unavailable)?;
     // Output key: agent-supplied, validated with the full input rule set
@@ -205,7 +210,12 @@ async fn sheet_read_inner(
     )
     .await
     .map_err(|_| ToolError::EngineTimeout)?
-    .map_err(|_| ToolError::Internal("engine task failed".into()))?
+    .map_err(|e| {
+        // The panic payload carries the engine failure cause (e.g. an
+        // index-out-of-bounds); log it server-side, keep the wire fixed.
+        tracing::warn!(error = %e, "engine task failed");
+        ToolError::Internal("engine task failed".into())
+    })?
     .map_err(|e| match e {
         // NoSuchSheet is a caller-input problem; Open failures on a
         // validated, fetched workbook are internal.
@@ -259,7 +269,12 @@ async fn sheet_apply_inner(
     )
     .await
     .map_err(|_| ToolError::EngineTimeout)?
-    .map_err(|_| ToolError::Internal("engine task failed".into()))?
+    .map_err(|e| {
+        // The panic payload carries the engine failure cause (e.g. an
+        // index-out-of-bounds); log it server-side, keep the wire fixed.
+        tracing::warn!(error = %e, "engine task failed");
+        ToolError::Internal("engine task failed".into())
+    })?
     .map_err(|e| match e {
         // Input problems (sheet/address/name/op) vs IO problems (Open/Write)
         // on a fetched workbook.

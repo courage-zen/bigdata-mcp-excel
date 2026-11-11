@@ -17,11 +17,11 @@ pub enum ToolError {
     S3Unavailable,
     #[error("file not found or not accessible")]
     S3ObjectNotFound,
-    // Plain payload, not #[source]: String does not implement
-    // std::error::Error. Display stays the fixed "download failed" — the
-    // payload never reaches the message (pinned by the sanitization tests).
+    // No payload, by design: object_store messages embed endpoint URLs, so
+    // nothing from the raw error reaches the wire. The diagnostic detail
+    // goes to the server log at the conversion site instead.
     #[error("download failed")]
-    S3FetchFailed(String),
+    S3FetchFailed,
     #[error("upload failed")]
     S3UploadFailed,
     #[error("object exceeds the {0} byte limit")]
@@ -42,7 +42,7 @@ impl ToolError {
         match self {
             Self::S3Unavailable => "S3_UNAVAILABLE",
             Self::S3ObjectNotFound => "S3_OBJECT_NOT_FOUND",
-            Self::S3FetchFailed(_) => "S3_FETCH_FAILED",
+            Self::S3FetchFailed => "S3_FETCH_FAILED",
             Self::S3UploadFailed => "S3_UPLOAD_FAILED",
             Self::S3ObjectTooLarge(_) => "S3_OBJECT_TOO_LARGE",
             Self::S3InvalidKey(_) => "S3_INVALID_KEY",
@@ -59,9 +59,13 @@ impl From<StorageError> for ToolError {
             StorageError::NotFound => Self::S3ObjectNotFound,
             StorageError::TooLarge(limit) => Self::S3ObjectTooLarge(limit),
             // Download-stage failures: network, 403, or wall-clock timeout.
-            // The raw error is dropped here: object_store messages embed
-            // endpoint URLs; the fixed Display is the only thing callers see.
-            StorageError::Failed | StorageError::Timeout => Self::S3FetchFailed(e.to_string()),
+            // The raw error is logged server-side (its message embeds
+            // endpoint URLs) but never reaches the wire: Display stays the
+            // fixed "download failed".
+            StorageError::Failed | StorageError::Timeout => {
+                tracing::warn!(error = %e, "download-stage failure");
+                Self::S3FetchFailed
+            }
         }
     }
 }
@@ -84,10 +88,7 @@ mod tests {
             ToolError::S3ObjectNotFound.error_code(),
             "S3_OBJECT_NOT_FOUND"
         );
-        assert_eq!(
-            ToolError::S3FetchFailed(String::new()).error_code(),
-            "S3_FETCH_FAILED"
-        );
+        assert_eq!(ToolError::S3FetchFailed.error_code(), "S3_FETCH_FAILED");
         assert_eq!(ToolError::S3UploadFailed.error_code(), "S3_UPLOAD_FAILED");
         assert_eq!(
             ToolError::S3ObjectTooLarge(100).error_code(),
@@ -113,7 +114,7 @@ mod tests {
         let cases = vec![
             ToolError::S3Unavailable,
             ToolError::S3ObjectNotFound,
-            ToolError::S3FetchFailed("net".into()),
+            ToolError::S3FetchFailed,
             ToolError::S3UploadFailed,
             ToolError::S3ObjectTooLarge(100),
             ToolError::S3InvalidKey("bad".into()),
@@ -140,14 +141,13 @@ mod tests {
     }
 
     #[test]
-    fn fetch_failed_display_excludes_leaky_payload() {
+    fn fetch_failed_display_is_fixed() {
         // Display is the wire message (render uses e.to_string() for the
-        // "error" field), so even a directly-constructed leaky payload must
-        // never reach it.
-        let e = ToolError::S3FetchFailed("http://minio:9000/uploads broke".into());
-        assert_eq!(e.to_string(), "download failed");
-        // The From<StorageError> conversion must land on the same fixed
+        // "error" field). The variant has no payload at all — the type
+        // system now guarantees no raw error text can reach the wire —
+        // and the From<StorageError> conversion lands on the fixed
         // Display, not on StorageError's message.
+        assert_eq!(ToolError::S3FetchFailed.to_string(), "download failed");
         let e: ToolError = StorageError::Failed.into();
         assert_eq!(e.to_string(), "download failed");
     }
