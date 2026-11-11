@@ -98,17 +98,6 @@ pub async fn fetch_to_tempfile(
     Ok(TempFile { inner })
 }
 
-/// Generate a fresh output key under `prefix`: `<prefix><uuid>.xlsx`.
-/// Collision-free by construction.
-pub fn generated_output_key(prefix: &str) -> String {
-    let p = if prefix.ends_with('/') {
-        prefix.to_string()
-    } else {
-        format!("{prefix}/")
-    };
-    format!("{}{}.xlsx", p, uuid::Uuid::new_v4())
-}
-
 /// Upload bytes to `key`.
 pub async fn upload_bytes(
     store: &dyn ObjectStore,
@@ -142,18 +131,5 @@ mod tests {
     fn client_builds_with_minio_endpoint() {
         // Build only — no network. Proves path-style + allow_http are accepted.
         assert!(client(&s3()).is_ok());
-    }
-
-    #[test]
-    fn output_key_generation() {
-        let generated = generated_output_key("excel-mcp-out/");
-        assert!(generated.starts_with("excel-mcp-out/"));
-        assert!(generated.ends_with(".xlsx"));
-    }
-
-    #[test]
-    fn output_key_generation_adds_slash() {
-        let generated = generated_output_key("excel-mcp-out");
-        assert!(generated.starts_with("excel-mcp-out/"));
     }
 }

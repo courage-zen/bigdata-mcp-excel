@@ -12,7 +12,6 @@ pub struct Config {
     pub port: u16,
     pub auth_keys: Vec<String>,
     pub s3: Option<S3Config>,
-    pub output_prefix: String,
     pub inline_max_bytes: u64,
     pub max_file_bytes: u64,
 }
@@ -57,9 +56,6 @@ impl Config {
             })
             .unwrap_or_default();
         let s3 = S3Config::from_map(&get);
-        let output_prefix = get("S3_OUTPUT_PREFIX")
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| "excel-mcp-out/".into());
         let inline_max_bytes = parse_bytes(get("EXCEL_INLINE_MAX_BYTES"), 2 * 1024 * 1024);
         let max_file_bytes = parse_bytes(get("EXCEL_MAX_FILE_BYTES"), 100 * 1024 * 1024);
         Config {
@@ -67,7 +63,6 @@ impl Config {
             port,
             auth_keys,
             s3,
-            output_prefix,
             inline_max_bytes,
             max_file_bytes,
         }
@@ -142,7 +137,6 @@ mod tests {
         assert_eq!(cfg.port, 8080);
         assert!(cfg.auth_keys.is_empty());
         assert!(cfg.s3.is_none());
-        assert_eq!(cfg.output_prefix, "excel-mcp-out/");
         assert_eq!(cfg.inline_max_bytes, 2 * 1024 * 1024);
         assert_eq!(cfg.max_file_bytes, 100 * 1024 * 1024);
     }

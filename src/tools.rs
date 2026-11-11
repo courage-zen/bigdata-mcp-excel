@@ -265,7 +265,6 @@ mod tests {
             port: 0,
             auth_keys: vec![],
             s3: None,
-            output_prefix: "excel-mcp-out/".into(),
             inline_max_bytes: 1024 * 1024,
             max_file_bytes: 1024 * 1024,
         }
@@ -459,7 +458,6 @@ mod tests {
                 use_path_style: true,
                 allowed_key_prefixes: vec![],
             }),
-            output_prefix: "excel-mcp-out/".into(),
             inline_max_bytes: 1024,
             max_file_bytes: 1024,
         }
