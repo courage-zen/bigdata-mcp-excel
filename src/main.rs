@@ -4,6 +4,7 @@ mod engine;
 mod s3keys;
 mod server;
 mod storage;
+mod toolerr;
 mod tools;
 mod util;
 
