@@ -97,7 +97,7 @@ env var is gone). Workspace isolation is convention-level: have agents use
 make the server enforce the boundary for both reads and writes.
 
 - `/health` is auth-exempt and returns `{"ok":true,"s3":"configured",
-  "version":"0.1.2"}` — the `s3` field tells you whether the S3 env is
+  "version":"0.2.0"}` — the `s3` field tells you whether the S3 env is
   complete.
 - `/mcp` requires `Authorization: Bearer <key>` when `MCP_AUTH_KEY` is set.
 - The MCP endpoint follows the Streamable HTTP transport: `initialize`,
@@ -149,8 +149,8 @@ agent 远程调用。所有文件 IO 走 S3（推荐同集群 MinIO）：agent �
 
 ```bash
 # 1. 构建并推送镜像（或从 GitHub Release 下载 tarball 后 docker load）
-docker build -t <registry>/excel-mcp:0.1.2 -f deploy/Dockerfile .
-docker push <registry>/excel-mcp:0.1.2
+docker build -t <registry>/excel-mcp:0.2.0 -f deploy/Dockerfile .
+docker push <registry>/excel-mcp:0.2.0
 
 # 2. 创建认证与 S3 凭证 secret
 kubectl create secret generic excel-mcp-auth \
