@@ -79,16 +79,6 @@ pub async fn fetch_to_tempfile(
     use tokio::io::AsyncWriteExt;
 
     let location = store_path(key);
-    let get = store.get(&location).await.map_err(|e| match e {
-        object_store::Error::NotFound { .. } => StorageError::NotFound,
-        _ => StorageError::Failed,
-    })?;
-    let size = get.meta.size;
-    if size > max_bytes {
-        return Err(StorageError::TooLarge(max_bytes));
-    }
-    let mut reader = get.into_stream();
-
     let inner = tempfile::Builder::new()
         .prefix("excel-mcp-in-")
         .suffix(".xlsx")
@@ -98,9 +88,19 @@ pub async fn fetch_to_tempfile(
     let mut writer = tokio::io::BufWriter::new(tokio::fs::File::from_std(file));
 
     let mut total: u64 = 0;
-    // The whole read loop is bounded by the download wall clock. The
-    // tempfile guard is dropped (file deleted) on every early return.
+    // The whole download — metadata get, size check, and the read loop —
+    // is bounded by the standard §4 wall clock. The tempfile guard is
+    // dropped (file deleted) on every early return.
     let result = tokio::time::timeout(DOWNLOAD_WALL, async {
+        let get = store.get(&location).await.map_err(|e| match e {
+            object_store::Error::NotFound { .. } => StorageError::NotFound,
+            _ => StorageError::Failed,
+        })?;
+        let size = get.meta.size;
+        if size > max_bytes {
+            return Err(StorageError::TooLarge(max_bytes));
+        }
+        let mut reader = get.into_stream();
         while let Some(chunk) = reader.next().await {
             let bytes = chunk.map_err(|_| StorageError::Failed)?;
             total += bytes.len() as u64;
