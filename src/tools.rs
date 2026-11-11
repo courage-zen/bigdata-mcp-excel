@@ -378,6 +378,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sheet_apply_rejects_out_of_allowlist_output_key() {
+        // Mirror of the create_xlsx test: the write side of sheet_apply
+        // obeys the same allowlist. Input key is inside the list so the
+        // rejection proves the OUTPUT key check fires.
+        let mut cfg = url_cfg();
+        cfg.s3.as_mut().unwrap().allowed_key_prefixes = vec!["workspaces/".into()];
+        let server = ExcelMcp::new(cfg);
+        let result = server
+            .sheet_apply(Parameters(SheetApplyArgs {
+                s3_key: "workspaces/ws-1/in.xlsx".into(),
+                output_key: "excel-mcp-out/a.xlsx".into(),
+                sheet: None,
+                cells: vec![],
+                ops: vec![],
+            }))
+            .await;
+        let msg = match &result {
+            Err(e) => e.message.to_string(),
+            Ok(r) => extract_text(r).unwrap_or_default(),
+        };
+        assert!(
+            msg.contains("allowlist"),
+            "expected allowlist rejection, got: {msg}"
+        );
+    }
+
+    #[tokio::test]
     async fn sheet_read_rejects_dangerous_key() {
         // Path-traversal keys must be rejected before any S3 call.
         let mut cfg = test_cfg();
