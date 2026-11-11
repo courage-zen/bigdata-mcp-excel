@@ -37,13 +37,13 @@ Three tools:
         ["apple", 3, "=B2*2"]
       ],
       "sheet_name": "Sheet1",
-      "output_key": "reports/fruit.xlsx"
+      "output_key": "workspaces/ws-42/reports/fruit.xlsx"
     }
   }
 }
 ```
 
-Response: `{"s3_key": "reports/fruit.xlsx", "cells_written": 6,
+Response: `{"s3_key": "workspaces/ws-42/reports/fruit.xlsx", "cells_written": 6,
 "content_b64": "..."}` (`content_b64` only when the file is at or below the
 inline size limit).
 
@@ -52,7 +52,7 @@ inline size limit).
 ```json
 {
   "name": "sheet_read",
-  "arguments": { "s3_key": "reports/fruit.xlsx", "sheet": "Sheet1", "max_rows": 500 }
+  "arguments": { "s3_key": "workspaces/ws-42/reports/fruit.xlsx", "sheet": "Sheet1", "max_rows": 500 }
 }
 ```
 
@@ -62,13 +62,15 @@ inline size limit).
 {
   "name": "sheet_apply",
   "arguments": {
-    "s3_key": "reports/fruit.xlsx",
-    "output_key": "reports/fruit-v2.xlsx",
+    "s3_key": "workspaces/ws-42/reports/fruit.xlsx",
+    "output_key": "workspaces/ws-42/reports/fruit-v2.xlsx",
     "cells": [{ "address": "B2", "value": 10 }],
     "ops": [{ "type": "insert_rows", "at": 4, "count": 1 }]
   }
 }
 ```
+
+If an object already exists at `output_key`, it is overwritten (idempotent re-runs).
 
 ## Configuration
 
@@ -84,10 +86,15 @@ Environment variables (see `.env.example` for the full annotated list):
 | `AWS_ENDPOINT_URL` | *(empty)* | MinIO/R2 endpoint; empty = AWS S3 |
 | `S3_REGION` | `us-east-1` | region (falls back to `AWS_REGION`) |
 | `S3_USE_PATH_STYLE` | auto | path-style iff `AWS_ENDPOINT_URL` is set |
-| `S3_KEY_PREFIXES` | *(empty)* | segment-aware allowlist for readable input keys |
-| `S3_OUTPUT_PREFIX` | `excel-mcp-out/` | prefix for generated output keys |
+| `S3_KEY_PREFIXES` | *(empty)* | segment-aware allowlist for readable inputs AND writable outputs |
 | `EXCEL_INLINE_MAX_BYTES` | `2097152` | base64 inline cutoff (2 MiB) |
 | `EXCEL_MAX_FILE_BYTES` | `104857600` | upload/download cap (100 MiB) |
+
+**0.2.0 breaking change:** `create_xlsx` requires an explicit `output_key` —
+the server no longer generates keys under a default `S3_OUTPUT_PREFIX` (that
+env var is gone). Workspace isolation is convention-level: have agents use
+`workspaces/<ws-id>/…` keys and set `S3_KEY_PREFIXES` (e.g. `workspaces/`) to
+make the server enforce the boundary for both reads and writes.
 
 - `/health` is auth-exempt and returns `{"ok":true,"s3":"configured",
   "version":"0.1.2"}` — the `s3` field tells you whether the S3 env is
