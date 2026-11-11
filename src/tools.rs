@@ -24,10 +24,9 @@ pub struct CreateXlsxArgs {
     /// Optional sheet name when data is a bare 2-D array.
     #[serde(default)]
     pub sheet_name: Option<String>,
-    /// Optional explicit output key (must end with .xlsx); default is
-    /// generated under S3_OUTPUT_PREFIX.
-    #[serde(default)]
-    pub output_key: Option<String>,
+    /// Full S3 key for the new workbook (required, must end with .xlsx);
+    /// use the caller's workspace path, e.g. workspaces/<ws-id>/<name>.xlsx.
+    pub output_key: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -283,13 +282,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn create_xlsx_rejects_missing_output_key() {
+        // The generated-key fallback is gone: a missing output_key must
+        // fail at deserialization, before any engine or S3 work.
+        let raw = serde_json::json!({"data": [[1]]});
+        let parsed: Result<CreateXlsxArgs, _> = serde_json::from_value(raw);
+        let err = parsed.expect_err("missing output_key must fail to deserialize");
+        assert!(
+            err.to_string().contains("output_key"),
+            "error names the field: {err}"
+        );
+    }
+
+    #[tokio::test]
     async fn create_xlsx_errors_without_s3() {
         let server = ExcelMcp::new(test_cfg());
         let result = server
             .create_xlsx(Parameters(CreateXlsxArgs {
                 data: serde_json::json!([[1, 2], [3, "=SUM(A1:B1)"]]),
                 sheet_name: None,
-                output_key: None,
+                output_key: "excel-mcp-out/a.xlsx".into(),
             }))
             .await;
         // The not-configured error surfaces as an MCP error.
@@ -325,7 +337,7 @@ mod tests {
             .create_xlsx(Parameters(CreateXlsxArgs {
                 data: serde_json::json!([[1]]),
                 sheet_name: None,
-                output_key: Some("not-an-xlsx.csv".into()),
+                output_key: "not-an-xlsx.csv".into(),
             }))
             .await;
         let msg = match result {
