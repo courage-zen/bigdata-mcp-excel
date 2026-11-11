@@ -397,12 +397,12 @@ fn create_read_apply_roundtrip() {
     let created = stack
         .tool_result_json(
             "create_xlsx",
-            serde_json::json!({"data": [["name", "qty"], ["apple", 3], ["pear", 5]]}),
+            serde_json::json!({"data": [["name", "qty"], ["apple", 3], ["pear", 5]], "output_key": "workspaces/ws-42/inventory.xlsx"}),
             10,
         )
         .unwrap();
     let s3_key = created["s3_key"].as_str().unwrap().to_string();
-    assert!(s3_key.starts_with("excel-mcp-out/"), "key: {s3_key}");
+    assert_eq!(s3_key, "workspaces/ws-42/inventory.xlsx");
     assert_eq!(created["cells_written"], 6);
     let b64 = created["content_b64"].as_str().unwrap();
     use base64::Engine as _;
@@ -425,7 +425,7 @@ fn create_read_apply_roundtrip() {
             "sheet_apply",
             serde_json::json!({
                 "s3_key": s3_key,
-                "output_key": "excel-mcp-out/edited.xlsx",
+                "output_key": "workspaces/ws-42/edited.xlsx",
                 "cells": [{"address": "C2", "value": "fresh"}],
             }),
             12,
@@ -433,17 +433,17 @@ fn create_read_apply_roundtrip() {
         .unwrap();
     assert_eq!(
         applied["s3_key"].as_str().unwrap(),
-        "excel-mcp-out/edited.xlsx"
+        "workspaces/ws-42/edited.xlsx"
     );
     assert_eq!(applied["cells_edited"], 1);
 
-    let edited = stack.get_object("excel-mcp-out/edited.xlsx").unwrap();
+    let edited = stack.get_object("workspaces/ws-42/edited.xlsx").unwrap();
     assert_eq!(&edited[0..2], b"PK");
     // Read the edited copy back through the tool to see the new cell.
     let read2 = stack
         .tool_result_json(
             "sheet_read",
-            serde_json::json!({"s3_key": "excel-mcp-out/edited.xlsx"}),
+            serde_json::json!({"s3_key": "workspaces/ws-42/edited.xlsx"}),
             13,
         )
         .unwrap();
