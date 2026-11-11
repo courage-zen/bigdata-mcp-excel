@@ -470,12 +470,25 @@ fn traversal_key_is_rejected() {
             20,
         )
         .unwrap();
-    // Key validation fails before the tool body runs, so rmcp surfaces it
-    // as a JSON-RPC error object; a tool-level isError result is equally
-    // acceptable. Anything else means the key slipped through.
-    let rpc_error = resp.get("error").is_some();
-    let is_error = resp["result"]["isError"].as_bool().unwrap_or(false);
-    assert!(rpc_error || is_error, "traversal key must fail: {resp}");
+    // Since the tool-result-layer switch (0.3.0), key validation happens
+    // inside the tool body, so the rejection is always a tool-level
+    // is_error result carrying the machine-readable error_code payload —
+    // never a JSON-RPC protocol error.
+    assert!(
+        resp.get("error").is_none(),
+        "business failures must not surface as protocol errors: {resp}"
+    );
+    assert_eq!(resp["result"]["isError"], true, "rejection sets isError");
+    let text = resp["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no text in tool result: {resp}"));
+    let v: serde_json::Value = serde_json::from_str(text)
+        .unwrap_or_else(|e| panic!("error payload must be JSON: {text} ({e})"));
+    assert_eq!(v["error_code"], "S3_INVALID_KEY", "payload: {text}");
+    assert!(
+        v["error"].as_str().unwrap().contains("invalid s3 key"),
+        "got: {text}"
+    );
 }
 
 #[test]

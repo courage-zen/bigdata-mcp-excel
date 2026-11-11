@@ -386,6 +386,18 @@ mod tests {
         assert_eq!(text, "{\"s3_key\":\"a/b.xlsx\"}");
     }
 
+    #[test]
+    fn processing_wall_is_pinned_to_30s() {
+        // Constant pin: the standard §4 processing wall is 30s. We cannot
+        // inject a hanging engine (engine calls are direct functions, not
+        // trait objects), and a slow-to-build workbook burns real CPU, not
+        // tokio time, so a frozen clock can't shortcut it. The wiring is
+        // exercised on every create/read/apply call; if a cheap injection
+        // point appears later, upgrade this to drive a real timeout.
+        use std::time::Duration;
+        assert_eq!(PROCESSING_WALL, Duration::from_secs(30));
+    }
+
     #[tokio::test]
     async fn create_xlsx_errors_without_s3() {
         let server = ExcelMcp::new(test_cfg());
