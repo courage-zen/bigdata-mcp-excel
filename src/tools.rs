@@ -94,19 +94,16 @@ impl ExcelMcp {
             .await
             .map_err(|_| McpError::internal_error("engine task failed", None))?
             .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
-
-        // Resolve output key: explicit (validated) or generated.
-        let output_key = match args.output_key.as_deref() {
-            Some(explicit) => crate::s3keys::normalize_output_key(explicit)
-                .map_err(|e| McpError::invalid_params(e.to_string(), None))?,
-            None => crate::storage::generated_output_key(&self.cfg.output_prefix),
-        };
         let s3 = self.cfg.s3.clone().ok_or_else(|| {
             McpError::internal_error(
                 "S3 output is not configured on this server; ask the operator to set S3_BUCKET and credentials",
                 None,
             )
         })?;
+        // Output key: agent-supplied, validated with the full input rule
+        // set plus the .xlsx suffix rule.
+        let output_key = crate::s3keys::normalize_output_key(&args.output_key, &s3)
+            .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
         let store = crate::storage::client(&s3)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         let store: Box<dyn object_store::ObjectStore> = Box::new(store);
@@ -186,7 +183,7 @@ impl ExcelMcp {
         })?;
         let resolved_key = crate::s3keys::resolve_input(&args.s3_key, &s3)
             .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
-        let output_key = crate::s3keys::normalize_output_key(&args.output_key)
+        let output_key = crate::s3keys::normalize_output_key(&args.output_key, &s3)
             .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
         let store = crate::storage::client(&s3)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
@@ -353,6 +350,30 @@ mod tests {
         assert!(
             msg.contains(".xlsx"),
             "expected output-key rejection, got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_xlsx_rejects_out_of_allowlist_output_key() {
+        // With an allowlist configured, a write outside it is refused
+        // before any network call — same guarantee reads have.
+        let mut cfg = url_cfg();
+        cfg.s3.as_mut().unwrap().allowed_key_prefixes = vec!["workspaces/".into()];
+        let server = ExcelMcp::new(cfg);
+        let result = server
+            .create_xlsx(Parameters(CreateXlsxArgs {
+                data: serde_json::json!([[1]]),
+                sheet_name: None,
+                output_key: "excel-mcp-out/a.xlsx".into(),
+            }))
+            .await;
+        let msg = match &result {
+            Err(e) => e.message.to_string(),
+            Ok(r) => extract_text(r).unwrap_or_default(),
+        };
+        assert!(
+            msg.contains("allowlist"),
+            "expected allowlist rejection, got: {msg}"
         );
     }
 
