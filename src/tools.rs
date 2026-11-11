@@ -14,9 +14,10 @@ use serde::Deserialize;
 use crate::config::Config;
 use crate::toolerr::ToolError;
 
-/// Render a tool outcome: success JSON or the dual-channel error payload
-/// {"error_code", "error"} with is_error=true. The single place error
-/// payloads are shaped, so codes and messages cannot drift per-tool.
+/// Render a tool outcome: success payload (raw text or JSON) or the
+/// dual-channel error payload {"error_code", "error"} with is_error=true.
+/// The single place error payloads are shaped, so codes and messages
+/// cannot drift per-tool.
 fn render(value: Result<serde_json::Value, ToolError>) -> CallToolResult {
     match value {
         Ok(v) => {
@@ -589,9 +590,6 @@ mod tests {
                 ops: vec![],
             }))
             .await;
-        // Mirror of the sheet_read accept test: the URL converts to a key,
-        // validation passes, and the failure is the unreachable endpoint's
-        // download — never key rejection — with no endpoint leaked.
         let msg = error_payload(&result, "S3_FETCH_FAILED");
         assert!(
             !msg.contains("does not match bucket")

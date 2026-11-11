@@ -32,7 +32,7 @@ pub enum ToolError {
     InvalidArguments(String),
     #[error("processing timed out")]
     EngineTimeout,
-    #[error("internal error")]
+    #[error("internal error: {0}")]
     Internal(String),
 }
 
@@ -128,6 +128,15 @@ mod tests {
             assert!(!msg.contains("127.0.0.1"), "leak: {msg}");
             assert!(!msg.is_empty());
         }
+    }
+
+    #[test]
+    fn internal_display_carries_payload() {
+        // Internal is the diagnosability channel for engine/IO failures:
+        // the payload (engine message) must reach Display. Sanitization
+        // holds because engine messages never carry bucket/endpoint names.
+        let e = ToolError::Internal("workbook open failed".into());
+        assert_eq!(e.to_string(), "internal error: workbook open failed");
     }
 
     #[test]
