@@ -166,7 +166,7 @@ jobs:
 
           # create -> read round-trip through s3 keys
           created="$(curl -sf -X POST "$BASE" -H "$AUTH" -H "Mcp-Session-Id: $SID" -H "$CT" -H "$ACCEPT" \
-            -d '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"create_xlsx","arguments":{"data":[["name","qty"],["apple",3]]}},"id":3}')"
+            -d '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"create_xlsx","arguments":{"data":[["name","qty"],["apple",3]],"output_key":"workspaces/ws-1/smoke.xlsx"}},"id":3}')"
           echo "$created" | grep -q 's3_key' || { echo 'create_xlsx returned no s3_key'; echo "$created"; exit 1; }
 
           # sheet_read on the created key (extract it from the SSE response)
@@ -180,8 +180,8 @@ jobs:
           # sheet_apply: edit the created workbook into a new key
           # (cell edit field is "address", not "cell")
           applied="$(curl -sf -X POST "$BASE" -H "$AUTH" -H "Mcp-Session-Id: $SID" -H "$CT" -H "$ACCEPT" \
-            -d "{\"jsonrpc\":\"2.0\",\"method\":\"tools/call\",\"params\":{\"name\":\"sheet_apply\",\"arguments\":{\"s3_key\":\"${KEY}\",\"cells\":[{\"address\":\"C2\",\"value\":\"fresh\"}],\"output_key\":\"excel-mcp-out/edited.xlsx\"}},\"id\":5}")"
-          echo "$applied" | grep -q 'excel-mcp-out/edited.xlsx' || { echo 'sheet_apply failed'; echo "$applied"; exit 1; }
+            -d "{\"jsonrpc\":\"2.0\",\"method\":\"tools/call\",\"params\":{\"name\":\"sheet_apply\",\"arguments\":{\"s3_key\":\"${KEY}\",\"cells\":[{\"address\":\"C2\",\"value\":\"fresh\"}],\"output_key\":\"workspaces/ws-1/edited.xlsx\"}},\"id\":5}")"
+          echo "$applied" | grep -q 'workspaces/ws-1/edited.xlsx' || { echo 'sheet_apply failed'; echo "$applied"; exit 1; }
 
           # Bad key is rejected: rmcp surfaces tool errors as JSON-RPC error
           # objects ({"error":{...}}), not isError:true results — accept either.
