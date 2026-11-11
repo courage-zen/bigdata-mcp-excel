@@ -105,6 +105,9 @@ mod tests {
 
     #[test]
     fn messages_are_sanitized() {
+        // ToolError adds nothing beyond its own fixed strings plus the
+        // payload it was constructed with; end-to-end sanitization is
+        // pinned at construction sites in tools.rs tests.
         let cases = vec![
             ToolError::S3Unavailable,
             ToolError::S3ObjectNotFound,
@@ -123,6 +126,19 @@ mod tests {
             assert!(!msg.contains("127.0.0.1"), "leak: {msg}");
             assert!(!msg.is_empty());
         }
+    }
+
+    #[test]
+    fn fetch_failed_display_excludes_leaky_payload() {
+        // Display is the wire message (render uses e.to_string() for the
+        // "error" field), so even a directly-constructed leaky payload must
+        // never reach it.
+        let e = ToolError::S3FetchFailed("http://minio:9000/uploads broke".into());
+        assert_eq!(e.to_string(), "download failed");
+        // The From<StorageError> conversion must land on the same fixed
+        // Display, not on StorageError's message.
+        let e: ToolError = StorageError::Failed.into();
+        assert_eq!(e.to_string(), "download failed");
     }
 
     #[test]
