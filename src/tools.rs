@@ -299,7 +299,8 @@ impl ServerHandler for ExcelMcp {
                  automatically — do not download attachments to parse them locally. \
                  Every output goes to an explicit output_key you choose under \
                  the caller's workspace path (workspaces/<ws-id>/…); outputs \
-                 never land in a shared default prefix.",
+                 never land in a shared default prefix. \
+                 Tool failures return is_error results with {\"error_code\": ...}: check it before retrying.",
             )
             .with_server_info(Implementation::new(
                 env!("CARGO_PKG_NAME"),

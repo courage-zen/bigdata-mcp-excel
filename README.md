@@ -96,8 +96,17 @@ env var is gone). Workspace isolation is convention-level: have agents use
 `workspaces/<ws-id>/…` keys and set `S3_KEY_PREFIXES` (e.g. `workspaces/`) to
 make the server enforce the boundary for both reads and writes.
 
+**0.3.0 error contract:** every tool failure returns a tool result with
+`is_error: true` and a single text block
+`{"error_code": "<CODE>", "error": "<message>"}` — codes: `S3_UNAVAILABLE`,
+`S3_OBJECT_NOT_FOUND`, `S3_FETCH_FAILED`, `S3_UPLOAD_FAILED`,
+`S3_OBJECT_TOO_LARGE`, `S3_INVALID_KEY`, `INVALID_ARGUMENTS`,
+`ENGINE_TIMEOUT`, `INTERNAL`. Deserialization failures (missing required
+fields) remain protocol-level `invalid_params`. Timeouts: connect 10s,
+read 60s, download 60s wall clock, processing 30s wall clock.
+
 - `/health` is auth-exempt and returns `{"ok":true,"s3":"configured",
-  "version":"0.2.0"}` — the `s3` field tells you whether the S3 env is
+  "version":"0.3.0"}` — the `s3` field tells you whether the S3 env is
   complete.
 - `/mcp` requires `Authorization: Bearer <key>` when `MCP_AUTH_KEY` is set.
 - The MCP endpoint follows the Streamable HTTP transport: `initialize`,
@@ -156,8 +165,8 @@ agent 远程调用。所有文件 IO 走 S3（推荐同集群 MinIO）：agent �
 
 ```bash
 # 1. 构建并推送镜像（或从 GitHub Release 下载 tarball 后 docker load）
-docker build -t <registry>/excel-mcp:0.2.0 -f deploy/Dockerfile .
-docker push <registry>/excel-mcp:0.2.0
+docker build -t <registry>/excel-mcp:0.3.0 -f deploy/Dockerfile .
+docker push <registry>/excel-mcp:0.3.0
 
 # 2. 创建认证与 S3 凭证 secret
 kubectl create secret generic excel-mcp-auth \
