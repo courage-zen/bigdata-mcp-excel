@@ -1,5 +1,7 @@
-//! S3 key validation: the security boundary every tool input passes first.
-//! Port of markitdown-mcp's `validate_s3_key` semantics.
+//! S3 key validation: the security boundary every tool input and output
+//! destination passes first. Input-key rules port markitdown-mcp's
+//! `validate_s3_key` semantics; output keys mirror the same rule set plus
+//! the `.xlsx` suffix requirement.
 
 use crate::config::S3Config;
 
@@ -224,6 +226,13 @@ mod tests {
         assert!(normalize_output_key("workspaces/ws-1", &cfg).is_err()); // not .xlsx
         assert!(normalize_output_key("workspaces/ws-11/rep.xlsx", &cfg).is_err());
         assert!(normalize_output_key("excel-mcp-out/a.xlsx", &cfg).is_err());
+        assert!(normalize_output_key("other/a.xlsx", &cfg).is_err());
+    }
+
+    #[test]
+    fn output_key_allowlist_prefix_with_trailing_slash() {
+        let cfg = s3(&["workspaces/"]);
+        assert!(normalize_output_key("workspaces/a.xlsx", &cfg).is_ok());
         assert!(normalize_output_key("other/a.xlsx", &cfg).is_err());
     }
 
