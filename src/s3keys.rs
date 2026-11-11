@@ -6,8 +6,9 @@
 use crate::config::S3Config;
 
 /// Extensions never worth fetching: cheap block on smuggling executables.
-const DANGEROUS_EXTENSIONS: [&str; 12] = [
-    ".exe", ".bat", ".cmd", ".sh", ".ps1", ".scr", ".vbs", ".jar", ".app", ".dmg", ".pkg", ".deb",
+const DANGEROUS_EXTENSIONS: [&str; 16] = [
+    ".exe", ".msi", ".bat", ".cmd", ".sh", ".ps1", ".scr", ".vbs", ".jar", ".app", ".dmg", ".pkg",
+    ".deb", ".rpm", ".so", ".dll",
 ];
 
 #[derive(Debug, thiserror::Error)]
@@ -76,10 +77,9 @@ pub fn resolve_input(raw: &str, s3: &S3Config) -> Result<String, InvalidKey> {
     let (host, path) = match rest.split_once('/') {
         Some(split) => split,
         None => {
-            return Err(InvalidKey(format!(
-                "URL contains no object key (got '{raw}'); pass 's3_key' as a key or a URL like http://<endpoint>/{}/<key>",
-                s3.bucket
-            )));
+            return Err(InvalidKey(
+                "URL contains no object key; pass 's3_key' as a plain key or a full object-store URL of an object in the configured bucket".into(),
+            ));
         }
     };
     // Virtual-host style: host is "<bucket>.<endpoint-domain>".
@@ -90,19 +90,17 @@ pub fn resolve_input(raw: &str, s3: &S3Config) -> Result<String, InvalidKey> {
     }
     // Bucket-only or trailing-slash URL: segment matches, but no key.
     if path == s3.bucket || path == format!("{}/", s3.bucket) {
-        return Err(InvalidKey(format!(
-            "URL contains no object key (got '{raw}'); pass 's3_key' as a key or a URL like http://<endpoint>/{}/<key>",
-            s3.bucket
-        )));
+        return Err(InvalidKey(
+            "URL contains no object key; pass 's3_key' as a plain key or a full object-store URL of an object in the configured bucket".into(),
+        ));
     }
     // Path style: first path segment is the bucket.
     let key = match path.strip_prefix(&format!("{}/", s3.bucket)) {
         Some(key) => key,
         None => {
-            return Err(InvalidKey(format!(
-                "URL host or first path segment does not match bucket '{}' (got '{raw}'); expected http://<endpoint>/{}/<key>",
-                s3.bucket, s3.bucket
-            )));
+            return Err(InvalidKey(
+                "URL host or first path segment does not match the configured bucket; expected an object-store URL of an object in the configured bucket".into(),
+            ));
         }
     };
     validate_input_key(key, s3)
@@ -180,6 +178,21 @@ mod tests {
     fn rejects_dangerous_extensions() {
         assert!(validate_input_key("payload.exe", &s3(&[])).is_err());
         assert!(validate_input_key("payload.CMD", &s3(&[])).is_err());
+        // The full S3 usage standard blocklist, both sides of the IO.
+        for ext in [
+            ".exe", ".msi", ".bat", ".cmd", ".sh", ".ps1", ".scr", ".vbs", ".jar", ".app", ".dmg",
+            ".pkg", ".deb", ".rpm", ".so", ".dll",
+        ] {
+            assert!(
+                validate_input_key(&format!("payload{ext}"), &s3(&[])).is_err(),
+                "input side must reject {ext}"
+            );
+            assert!(
+                normalize_output_key(&format!("payload{ext}.xlsx").replace(".xlsx", ""), &s3(&[]))
+                    .is_err(),
+                "output side must reject {ext}"
+            );
+        }
     }
 
     #[test]
@@ -320,17 +333,8 @@ mod tests {
         for url in ["http://minio:9000/uploads", "http://minio:9000/uploads/"] {
             let err = resolve_input(url, &cfg).unwrap_err().to_string();
             assert!(err.contains("no object key"), "for {url} got: {err}");
+            assert!(!err.contains("uploads"), "must not name the bucket: {err}");
         }
-    }
-
-    #[test]
-    fn resolve_url_first_segment_not_bucket() {
-        // A URL pointing elsewhere is rejected with an actionable message.
-        let cfg = url_s3();
-        let err = resolve_input("http://other-host:9000/otherbucket/workspaces/a.xlsx", &cfg)
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("uploads"), "message names the bucket: {err}");
     }
 
     #[test]
@@ -340,5 +344,28 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("no object key"), "message: {err}");
+        assert!(
+            !err.contains("minio"),
+            "must not echo the rejected URL: {err}"
+        );
+    }
+
+    #[test]
+    fn resolve_url_first_segment_not_bucket() {
+        // A URL pointing elsewhere is rejected without naming the bucket or
+        // echoing the rejected key (error-message sanitization).
+        let cfg = url_s3();
+        let err = resolve_input("http://other-host:9000/otherbucket/workspaces/a.xlsx", &cfg)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("does not match the configured bucket"),
+            "message: {err}"
+        );
+        assert!(!err.contains("uploads"), "must not name the bucket: {err}");
+        assert!(
+            !err.contains("other-host"),
+            "must not echo the rejected URL: {err}"
+        );
     }
 }

@@ -56,8 +56,16 @@ impl Config {
             })
             .unwrap_or_default();
         let s3 = S3Config::from_map(&get);
-        let inline_max_bytes = parse_bytes(get("EXCEL_INLINE_MAX_BYTES"), 2 * 1024 * 1024);
-        let max_file_bytes = parse_bytes(get("EXCEL_MAX_FILE_BYTES"), 100 * 1024 * 1024);
+        // Standard names (S3 usage standard); the private EXCEL_* names
+        // stay readable for one version cycle as a migration courtesy.
+        let inline_max_bytes = parse_bytes(
+            get("S3_INLINE_MAX_BYTES").or_else(|| get("EXCEL_INLINE_MAX_BYTES")),
+            2 * 1024 * 1024,
+        );
+        let max_file_bytes = parse_bytes(
+            get("S3_MAX_FILE_BYTES").or_else(|| get("EXCEL_MAX_FILE_BYTES")),
+            100 * 1024 * 1024,
+        );
         Config {
             host,
             port,
@@ -145,6 +153,40 @@ mod tests {
     fn s3_unconfigured_without_credentials() {
         let cfg = Config::from_map(map(&[("S3_BUCKET", "uploads")]));
         assert!(cfg.s3.is_none());
+    }
+
+    #[test]
+    fn s3_prefixed_byte_limits_are_standard_names() {
+        // The standard names win; old private names remain readable for one
+        // version cycle as a migration courtesy.
+        let cfg = Config::from_map(map(&[
+            ("S3_INLINE_MAX_BYTES", "4096"),
+            ("S3_MAX_FILE_BYTES", "8192"),
+        ]));
+        assert_eq!(cfg.inline_max_bytes, 4096);
+        assert_eq!(cfg.max_file_bytes, 8192);
+    }
+
+    #[test]
+    fn legacy_excel_byte_limit_names_still_readable() {
+        let cfg = Config::from_map(map(&[
+            ("EXCEL_INLINE_MAX_BYTES", "4096"),
+            ("EXCEL_MAX_FILE_BYTES", "8192"),
+        ]));
+        assert_eq!(cfg.inline_max_bytes, 4096);
+        assert_eq!(cfg.max_file_bytes, 8192);
+    }
+
+    #[test]
+    fn standard_name_overrides_legacy_when_both_set() {
+        let cfg = Config::from_map(map(&[
+            ("S3_INLINE_MAX_BYTES", "4096"),
+            ("EXCEL_INLINE_MAX_BYTES", "999"),
+            ("S3_MAX_FILE_BYTES", "8192"),
+            ("EXCEL_MAX_FILE_BYTES", "999"),
+        ]));
+        assert_eq!(cfg.inline_max_bytes, 4096);
+        assert_eq!(cfg.max_file_bytes, 8192);
     }
 
     #[test]

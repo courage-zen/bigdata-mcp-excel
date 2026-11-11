@@ -80,9 +80,9 @@ spec:
             #   value: "us-east-1"
             # - name: S3_KEY_PREFIXES
             #   value: ""            # restrict readable + writable key prefixes
-            # - name: EXCEL_INLINE_MAX_BYTES
+            # - name: S3_INLINE_MAX_BYTES
             #   value: "2097152"     # base64 inline cutoff (2 MiB)
-            # - name: EXCEL_MAX_FILE_BYTES
+            # - name: S3_MAX_FILE_BYTES
             #   value: "52428800"    # upload/download cap (50 MiB)
           livenessProbe:
             httpGet:

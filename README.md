@@ -87,8 +87,8 @@ Environment variables (see `.env.example` for the full annotated list):
 | `S3_REGION` | `us-east-1` | region (falls back to `AWS_REGION`) |
 | `S3_USE_PATH_STYLE` | auto | path-style iff `AWS_ENDPOINT_URL` is set |
 | `S3_KEY_PREFIXES` | *(empty)* | segment-aware allowlist for readable inputs AND writable outputs |
-| `EXCEL_INLINE_MAX_BYTES` | `2097152` | base64 inline cutoff (2 MiB) |
-| `EXCEL_MAX_FILE_BYTES` | `104857600` | upload/download cap (100 MiB) |
+| `S3_INLINE_MAX_BYTES` | `2097152` | base64 inline cutoff (2 MiB); legacy name `EXCEL_INLINE_MAX_BYTES` still honored |
+| `S3_MAX_FILE_BYTES` | `104857600` | upload/download cap (100 MiB); legacy name `EXCEL_MAX_FILE_BYTES` still honored |
 
 **0.2.0 breaking change:** `create_xlsx` requires an explicit `output_key` —
 the server no longer generates keys under a default `S3_OUTPUT_PREFIX` (that
