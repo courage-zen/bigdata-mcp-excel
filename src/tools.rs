@@ -24,10 +24,9 @@ pub struct CreateXlsxArgs {
     /// Optional sheet name when data is a bare 2-D array.
     #[serde(default)]
     pub sheet_name: Option<String>,
-    /// Optional explicit output key (must end with .xlsx); default is
-    /// generated under S3_OUTPUT_PREFIX.
-    #[serde(default)]
-    pub output_key: Option<String>,
+    /// Full S3 key for the new workbook (required, must end with .xlsx);
+    /// use the caller's workspace path, e.g. workspaces/<ws-id>/<name>.xlsx.
+    pub output_key: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -76,7 +75,7 @@ impl ExcelMcp {
     }
 
     #[tool(
-        description = "Create a new Excel (.xlsx) workbook from data: a 2-D array of cell values, or {\"sheets\":[{\"name\",\"rows\"}]} for several sheets. Strings starting with \"=\" are formulas. Prefer this over emitting CSV/markdown tables when the deliverable is a real spreadsheet. Returns the output s3_key and the file bytes base64-encoded when small."
+        description = "Create a new Excel (.xlsx) workbook from data: a 2-D array of cell values, or {\"sheets\":[{\"name\",\"rows\"}]} for several sheets. Strings starting with \"=\" are formulas. Prefer this over emitting CSV/markdown tables when the deliverable is a real spreadsheet. output_key is required: give the full destination S3 key ending in .xlsx, using the caller's workspace path (workspaces/<ws-id>/<name>.xlsx). Existing objects at that key are overwritten. Returns the output s3_key and the file bytes base64-encoded when small."
     )]
     async fn create_xlsx(
         &self,
@@ -95,19 +94,16 @@ impl ExcelMcp {
             .await
             .map_err(|_| McpError::internal_error("engine task failed", None))?
             .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
-
-        // Resolve output key: explicit (validated) or generated.
-        let output_key = match args.output_key.as_deref() {
-            Some(explicit) => crate::s3keys::normalize_output_key(explicit)
-                .map_err(|e| McpError::invalid_params(e.to_string(), None))?,
-            None => crate::storage::generated_output_key(&self.cfg.output_prefix),
-        };
         let s3 = self.cfg.s3.clone().ok_or_else(|| {
             McpError::internal_error(
                 "S3 output is not configured on this server; ask the operator to set S3_BUCKET and credentials",
                 None,
             )
         })?;
+        // Output key: agent-supplied, validated with the full input rule
+        // set plus the .xlsx suffix rule.
+        let output_key = crate::s3keys::normalize_output_key(&args.output_key, &s3)
+            .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
         let store = crate::storage::client(&s3)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         let store: Box<dyn object_store::ObjectStore> = Box::new(store);
@@ -173,7 +169,7 @@ impl ExcelMcp {
     }
 
     #[tool(
-        description = "Edit an .xlsx workbook from S3 and write a new copy: set cell values/formulas, insert rows/columns, add or rename sheets. The source object is never modified. Pass the source workbook's URL or S3 key as s3_key (URLs are converted to keys automatically); output_key must be an S3 key ending in .xlsx."
+        description = "Edit an .xlsx workbook from S3 and write a new copy: set cell values/formulas, insert rows/columns, add or rename sheets. The source object is never modified. Pass the source workbook's URL or S3 key as s3_key (URLs are converted to keys automatically); output_key must be the full destination S3 key ending in .xlsx, using the caller's workspace path (workspaces/<ws-id>/<name>.xlsx); an existing object there is overwritten."
     )]
     async fn sheet_apply(
         &self,
@@ -187,7 +183,7 @@ impl ExcelMcp {
         })?;
         let resolved_key = crate::s3keys::resolve_input(&args.s3_key, &s3)
             .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
-        let output_key = crate::s3keys::normalize_output_key(&args.output_key)
+        let output_key = crate::s3keys::normalize_output_key(&args.output_key, &s3)
             .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
         let store = crate::storage::client(&s3)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
@@ -250,7 +246,10 @@ impl ServerHandler for ExcelMcp {
                  sheet_apply edits an existing workbook and writes a new copy; \
                  create_xlsx builds a new .xlsx from data. All inputs are S3 keys, but full \
                  object-store URLs (e.g. platform attachment URLs) are accepted and converted \
-                 automatically — do not download attachments to parse them locally.",
+                 automatically — do not download attachments to parse them locally. \
+                 Every output goes to an explicit output_key you choose under \
+                 the caller's workspace path (workspaces/<ws-id>/…); outputs \
+                 never land in a shared default prefix.",
             )
             .with_server_info(Implementation::new(
                 env!("CARGO_PKG_NAME"),
@@ -269,7 +268,6 @@ mod tests {
             port: 0,
             auth_keys: vec![],
             s3: None,
-            output_prefix: "excel-mcp-out/".into(),
             inline_max_bytes: 1024 * 1024,
             max_file_bytes: 1024 * 1024,
         }
@@ -283,13 +281,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn create_xlsx_rejects_missing_output_key() {
+        // The generated-key fallback is gone: a missing output_key must
+        // fail at deserialization, before any engine or S3 work.
+        let raw = serde_json::json!({"data": [[1]]});
+        let parsed: Result<CreateXlsxArgs, _> = serde_json::from_value(raw);
+        let err = parsed.expect_err("missing output_key must fail to deserialize");
+        assert!(
+            err.to_string().contains("output_key"),
+            "error names the field: {err}"
+        );
+    }
+
+    #[tokio::test]
     async fn create_xlsx_errors_without_s3() {
         let server = ExcelMcp::new(test_cfg());
         let result = server
             .create_xlsx(Parameters(CreateXlsxArgs {
                 data: serde_json::json!([[1, 2], [3, "=SUM(A1:B1)"]]),
                 sheet_name: None,
-                output_key: None,
+                output_key: "excel-mcp-out/a.xlsx".into(),
             }))
             .await;
         // The not-configured error surfaces as an MCP error.
@@ -325,7 +336,7 @@ mod tests {
             .create_xlsx(Parameters(CreateXlsxArgs {
                 data: serde_json::json!([[1]]),
                 sheet_name: None,
-                output_key: Some("not-an-xlsx.csv".into()),
+                output_key: "not-an-xlsx.csv".into(),
             }))
             .await;
         let msg = match result {
@@ -341,6 +352,57 @@ mod tests {
         assert!(
             msg.contains(".xlsx"),
             "expected output-key rejection, got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_xlsx_rejects_out_of_allowlist_output_key() {
+        // With an allowlist configured, a write outside it is refused
+        // before any network call — same guarantee reads have.
+        let mut cfg = url_cfg();
+        cfg.s3.as_mut().unwrap().allowed_key_prefixes = vec!["workspaces/".into()];
+        let server = ExcelMcp::new(cfg);
+        let result = server
+            .create_xlsx(Parameters(CreateXlsxArgs {
+                data: serde_json::json!([[1]]),
+                sheet_name: None,
+                output_key: "excel-mcp-out/a.xlsx".into(),
+            }))
+            .await;
+        let msg = match &result {
+            Err(e) => e.message.to_string(),
+            Ok(r) => extract_text(r).unwrap_or_default(),
+        };
+        assert!(
+            msg.contains("allowlist"),
+            "expected allowlist rejection, got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn sheet_apply_rejects_out_of_allowlist_output_key() {
+        // Mirror of the create_xlsx test: the write side of sheet_apply
+        // obeys the same allowlist. Input key is inside the list so the
+        // rejection proves the OUTPUT key check fires.
+        let mut cfg = url_cfg();
+        cfg.s3.as_mut().unwrap().allowed_key_prefixes = vec!["workspaces/".into()];
+        let server = ExcelMcp::new(cfg);
+        let result = server
+            .sheet_apply(Parameters(SheetApplyArgs {
+                s3_key: "workspaces/ws-1/in.xlsx".into(),
+                output_key: "excel-mcp-out/a.xlsx".into(),
+                sheet: None,
+                cells: vec![],
+                ops: vec![],
+            }))
+            .await;
+        let msg = match &result {
+            Err(e) => e.message.to_string(),
+            Ok(r) => extract_text(r).unwrap_or_default(),
+        };
+        assert!(
+            msg.contains("allowlist"),
+            "expected allowlist rejection, got: {msg}"
         );
     }
 
@@ -399,7 +461,6 @@ mod tests {
                 use_path_style: true,
                 allowed_key_prefixes: vec![],
             }),
-            output_prefix: "excel-mcp-out/".into(),
             inline_max_bytes: 1024,
             max_file_bytes: 1024,
         }

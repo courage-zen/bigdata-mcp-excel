@@ -1,5 +1,7 @@
-//! S3 key validation: the security boundary every tool input passes first.
-//! Port of markitdown-mcp's `validate_s3_key` semantics.
+//! S3 key validation: the security boundary every tool input and output
+//! destination passes first. Input-key rules port markitdown-mcp's
+//! `validate_s3_key` semantics; output keys mirror the same rule set plus
+//! the `.xlsx` suffix requirement.
 
 use crate::config::S3Config;
 
@@ -106,10 +108,11 @@ pub fn resolve_input(raw: &str, s3: &S3Config) -> Result<String, InvalidKey> {
     validate_input_key(key, s3)
 }
 
-/// Normalize an output key: validation minus the input allowlist (outputs
-/// go to `S3_OUTPUT_PREFIX`, not the input roots) plus the .xlsx suffix
-/// rule.
-pub fn normalize_output_key(key: &str) -> Result<String, InvalidKey> {
+/// Normalize an output key: the full input rule set — format, traversal,
+/// dangerous extensions, segment-aware allowlist — plus the .xlsx suffix
+/// rule. Validation is symmetric: writes can never reach where reads
+/// cannot.
+pub fn normalize_output_key(key: &str, s3: &S3Config) -> Result<String, InvalidKey> {
     let key = key.trim();
     if key.is_empty() {
         return Err(InvalidKey("key is empty".into()));
@@ -129,6 +132,15 @@ pub fn normalize_output_key(key: &str) -> Result<String, InvalidKey> {
     }
     if !lower.ends_with(".xlsx") {
         return Err(InvalidKey("output key must end with .xlsx".into()));
+    }
+    if !s3.allowed_key_prefixes.is_empty()
+        && !s3.allowed_key_prefixes.iter().any(|p| {
+            key == p.as_str()
+                || key.starts_with(p.as_str())
+                    && (p.ends_with('/') || key.as_bytes().get(p.len()) == Some(&b'/'))
+        })
+    {
+        return Err(InvalidKey("key is outside the configured allowlist".into()));
     }
     Ok(key.to_string())
 }
@@ -194,15 +206,40 @@ mod tests {
 
     #[test]
     fn output_key_requires_xlsx_suffix() {
-        assert!(normalize_output_key("out/a.xlsx").is_ok());
-        assert!(normalize_output_key("out/a.csv").is_err());
-        assert!(normalize_output_key("out/a.XLSX").is_ok());
+        assert!(normalize_output_key("out/a.xlsx", &s3(&[])).is_ok());
+        assert!(normalize_output_key("out/a.csv", &s3(&[])).is_err());
+        assert!(normalize_output_key("out/a.XLSX", &s3(&[])).is_ok());
     }
 
     #[test]
     fn output_key_rejects_traversal() {
-        assert!(normalize_output_key("out/../etc/passwd.xlsx").is_err());
-        assert!(normalize_output_key("/abs.xlsx").is_err());
+        assert!(normalize_output_key("out/../etc/passwd.xlsx", &s3(&[])).is_err());
+        assert!(normalize_output_key("/abs.xlsx", &s3(&[])).is_err());
+    }
+
+    #[test]
+    fn output_key_allowlist_symmetric_with_input() {
+        // Writes obey the same segment-aware allowlist as reads: keys
+        // outside every configured prefix are refused.
+        let cfg = s3(&["workspaces/ws-1"]);
+        assert!(normalize_output_key("workspaces/ws-1/rep.xlsx", &cfg).is_ok());
+        assert!(normalize_output_key("workspaces/ws-1", &cfg).is_err()); // not .xlsx
+        assert!(normalize_output_key("workspaces/ws-11/rep.xlsx", &cfg).is_err());
+        assert!(normalize_output_key("excel-mcp-out/a.xlsx", &cfg).is_err());
+        assert!(normalize_output_key("other/a.xlsx", &cfg).is_err());
+    }
+
+    #[test]
+    fn output_key_allowlist_prefix_with_trailing_slash() {
+        let cfg = s3(&["workspaces/"]);
+        assert!(normalize_output_key("workspaces/a.xlsx", &cfg).is_ok());
+        assert!(normalize_output_key("other/a.xlsx", &cfg).is_err());
+    }
+
+    #[test]
+    fn output_key_unrestricted_without_allowlist() {
+        let cfg = s3(&[]);
+        assert!(normalize_output_key("any/where/a.xlsx", &cfg).is_ok());
     }
 
     // --- resolve_input: URL forms ---

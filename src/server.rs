@@ -46,7 +46,6 @@ mod tests {
             port: 0,
             auth_keys: vec!["k".into()],
             s3: None,
-            output_prefix: "excel-mcp-out/".into(),
             inline_max_bytes: 2048,
             max_file_bytes: 1024,
         }
