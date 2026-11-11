@@ -19,7 +19,16 @@ use crate::toolerr::ToolError;
 /// payloads are shaped, so codes and messages cannot drift per-tool.
 fn render(value: Result<serde_json::Value, ToolError>) -> CallToolResult {
     match value {
-        Ok(v) => CallToolResult::success(vec![ContentBlock::text(v.to_string())]),
+        Ok(v) => {
+            // Value::String carries a raw text payload (sheet_read returns
+            // the sheet JSON or markdown as text, not an object): emit it
+            // verbatim. Other values are JSON objects: compact-serialize.
+            let text = match v {
+                serde_json::Value::String(s) => s,
+                other => other.to_string(),
+            };
+            CallToolResult::success(vec![ContentBlock::text(text)])
+        }
         Err(e) => CallToolResult::error(vec![ContentBlock::text(
             serde_json::json!({
                 "error_code": e.error_code(),
@@ -360,6 +369,20 @@ mod tests {
             err.to_string().contains("output_key"),
             "error names the field: {err}"
         );
+    }
+
+    #[test]
+    fn render_string_value_emits_raw_text() {
+        // sheet_read's payload is raw text (sheet JSON or markdown), not a
+        // JSON string value: it must reach the wire verbatim, un-quoted.
+        let r = render(Ok(serde_json::Value::String("{\"sheets\":[]}".into())));
+        let text = extract_text(&r).unwrap();
+        assert_eq!(text, "{\"sheets\":[]}");
+
+        // Object values serialize compactly, as before.
+        let r = render(Ok(serde_json::json!({ "s3_key": "a/b.xlsx" })));
+        let text = extract_text(&r).unwrap();
+        assert_eq!(text, "{\"s3_key\":\"a/b.xlsx\"}");
     }
 
     #[tokio::test]
