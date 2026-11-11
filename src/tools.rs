@@ -75,7 +75,7 @@ impl ExcelMcp {
     }
 
     #[tool(
-        description = "Create a new Excel (.xlsx) workbook from data: a 2-D array of cell values, or {\"sheets\":[{\"name\",\"rows\"}]} for several sheets. Strings starting with \"=\" are formulas. Prefer this over emitting CSV/markdown tables when the deliverable is a real spreadsheet. Returns the output s3_key and the file bytes base64-encoded when small."
+        description = "Create a new Excel (.xlsx) workbook from data: a 2-D array of cell values, or {\"sheets\":[{\"name\",\"rows\"}]} for several sheets. Strings starting with \"=\" are formulas. Prefer this over emitting CSV/markdown tables when the deliverable is a real spreadsheet. output_key is required: give the full destination S3 key ending in .xlsx, using the caller's workspace path (workspaces/<ws-id>/<name>.xlsx). Existing objects at that key are overwritten. Returns the output s3_key and the file bytes base64-encoded when small."
     )]
     async fn create_xlsx(
         &self,
@@ -169,7 +169,7 @@ impl ExcelMcp {
     }
 
     #[tool(
-        description = "Edit an .xlsx workbook from S3 and write a new copy: set cell values/formulas, insert rows/columns, add or rename sheets. The source object is never modified. Pass the source workbook's URL or S3 key as s3_key (URLs are converted to keys automatically); output_key must be an S3 key ending in .xlsx."
+        description = "Edit an .xlsx workbook from S3 and write a new copy: set cell values/formulas, insert rows/columns, add or rename sheets. The source object is never modified. Pass the source workbook's URL or S3 key as s3_key (URLs are converted to keys automatically); output_key must be the full destination S3 key ending in .xlsx, using the caller's workspace path (workspaces/<ws-id>/<name>.xlsx); an existing object there is overwritten."
     )]
     async fn sheet_apply(
         &self,
@@ -246,7 +246,10 @@ impl ServerHandler for ExcelMcp {
                  sheet_apply edits an existing workbook and writes a new copy; \
                  create_xlsx builds a new .xlsx from data. All inputs are S3 keys, but full \
                  object-store URLs (e.g. platform attachment URLs) are accepted and converted \
-                 automatically — do not download attachments to parse them locally.",
+                 automatically — do not download attachments to parse them locally. \
+                 Every output goes to an explicit output_key you choose under \
+                 the caller's workspace path (workspaces/<ws-id>/…); outputs \
+                 never land in a shared default prefix.",
             )
             .with_server_info(Implementation::new(
                 env!("CARGO_PKG_NAME"),
