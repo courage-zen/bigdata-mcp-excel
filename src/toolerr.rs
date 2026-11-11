@@ -59,7 +59,9 @@ impl From<StorageError> for ToolError {
             StorageError::NotFound => Self::S3ObjectNotFound,
             StorageError::TooLarge(limit) => Self::S3ObjectTooLarge(limit),
             // Download-stage failures: network, 403, or wall-clock timeout.
-            StorageError::Failed => Self::S3FetchFailed(e.to_string()),
+            // The raw error is dropped here: object_store messages embed
+            // endpoint URLs; the fixed Display is the only thing callers see.
+            StorageError::Failed | StorageError::Timeout => Self::S3FetchFailed(e.to_string()),
         }
     }
 }
@@ -148,6 +150,8 @@ mod tests {
         let e: ToolError = crate::storage::StorageError::TooLarge(5).into();
         assert_eq!(e.error_code(), "S3_OBJECT_TOO_LARGE");
         let e: ToolError = crate::storage::StorageError::Failed.into();
+        assert_eq!(e.error_code(), "S3_FETCH_FAILED");
+        let e: ToolError = crate::storage::StorageError::Timeout.into();
         assert_eq!(e.error_code(), "S3_FETCH_FAILED");
         // InvalidKey's tuple constructor is private to s3keys; build one
         // through the real validation path (an empty key fails before the

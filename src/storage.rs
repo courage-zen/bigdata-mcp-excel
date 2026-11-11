@@ -2,6 +2,7 @@
 //! from bytes. All tool IO flows through these two functions.
 
 use std::path::Path;
+use std::time::Duration;
 
 use object_store::aws::AmazonS3Builder;
 use object_store::path::Path as StorePath;
@@ -9,12 +10,17 @@ use object_store::{ObjectStore, ObjectStoreExt, PutPayload};
 
 use crate::config::S3Config;
 
+/// Standard §4: whole-download monotonic wall clock.
+const DOWNLOAD_WALL: Duration = Duration::from_secs(60);
+
 #[derive(Debug, thiserror::Error)]
 pub enum StorageError {
     #[error("file not found or not accessible")]
     NotFound,
     #[error("download exceeded the {0} byte limit")]
     TooLarge(u64),
+    #[error("download timed out")]
+    Timeout,
     #[error("storage operation failed")]
     Failed,
 }
@@ -53,7 +59,8 @@ fn store_path(key: &str) -> StorePath {
 }
 
 /// Download one object into a fresh local tempfile. Fails NotFound for a
-/// missing key, TooLarge once more than `max_bytes` have been read.
+/// missing key, TooLarge once more than `max_bytes` have been read, Timeout
+/// once the whole download exceeds the standard §4 wall clock.
 pub async fn fetch_to_tempfile(
     store: &dyn ObjectStore,
     key: &str,
@@ -82,20 +89,29 @@ pub async fn fetch_to_tempfile(
     let mut writer = tokio::io::BufWriter::new(tokio::fs::File::from_std(file));
 
     let mut total: u64 = 0;
-    while let Some(chunk) = reader.next().await {
-        let bytes = chunk.map_err(|_| StorageError::Failed)?;
-        total += bytes.len() as u64;
-        if total > max_bytes {
-            return Err(StorageError::TooLarge(max_bytes));
+    // The whole read loop is bounded by the download wall clock. The
+    // tempfile guard is dropped (file deleted) on every early return.
+    let result = tokio::time::timeout(DOWNLOAD_WALL, async {
+        while let Some(chunk) = reader.next().await {
+            let bytes = chunk.map_err(|_| StorageError::Failed)?;
+            total += bytes.len() as u64;
+            if total > max_bytes {
+                return Err(StorageError::TooLarge(max_bytes));
+            }
+            writer
+                .write_all(&bytes)
+                .await
+                .map_err(|_| StorageError::Failed)?;
         }
-        writer
-            .write_all(&bytes)
-            .await
-            .map_err(|_| StorageError::Failed)?;
-    }
-    writer.flush().await.map_err(|_| StorageError::Failed)?;
+        writer.flush().await.map_err(|_| StorageError::Failed)
+    })
+    .await;
 
-    Ok(TempFile { inner })
+    match result {
+        Ok(Ok(())) => Ok(TempFile { inner }),
+        Ok(Err(e)) => Err(e),
+        Err(_elapsed) => Err(StorageError::Timeout),
+    }
 }
 
 /// Upload bytes to `key`.
@@ -114,6 +130,7 @@ pub async fn upload_bytes(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures::stream::{self, BoxStream};
 
     fn s3() -> S3Config {
         S3Config {
@@ -131,5 +148,104 @@ mod tests {
     fn client_builds_with_minio_endpoint() {
         // Build only — no network. Proves path-style + allow_http are accepted.
         assert!(client(&s3()).is_ok());
+    }
+
+    /// A store whose GET stream never yields: fetch must hit the wall-clock.
+    struct HangingStore;
+
+    impl std::fmt::Display for HangingStore {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "HangingStore")
+        }
+    }
+
+    impl std::fmt::Debug for HangingStore {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "HangingStore")
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl object_store::ObjectStore for HangingStore {
+        async fn put_opts(
+            &self,
+            _location: &object_store::path::Path,
+            _payload: object_store::PutPayload,
+            _opts: object_store::PutOptions,
+        ) -> object_store::Result<object_store::PutResult> {
+            unreachable!("not exercised")
+        }
+
+        async fn put_multipart_opts(
+            &self,
+            _location: &object_store::path::Path,
+            _opts: object_store::PutMultipartOptions,
+        ) -> object_store::Result<Box<dyn object_store::MultipartUpload>> {
+            unreachable!("not exercised")
+        }
+
+        async fn get_opts(
+            &self,
+            _location: &object_store::path::Path,
+            _options: object_store::GetOptions,
+        ) -> object_store::Result<object_store::GetResult> {
+            // Stream that never produces an item and never ends.
+            Ok(object_store::GetResult {
+                payload: object_store::GetResultPayload::Stream(Box::pin(stream::pending())),
+                meta: object_store::ObjectMeta {
+                    location: object_store::path::Path::default(),
+                    last_modified: Default::default(),
+                    size: 1,
+                    e_tag: None,
+                    version: None,
+                },
+                range: Default::default(),
+                attributes: Default::default(),
+                extensions: Default::default(),
+            })
+        }
+
+        fn delete_stream(
+            &self,
+            _locations: BoxStream<'static, object_store::Result<object_store::path::Path>>,
+        ) -> BoxStream<'static, object_store::Result<object_store::path::Path>> {
+            unreachable!("not exercised")
+        }
+
+        fn list(
+            &self,
+            _prefix: Option<&object_store::path::Path>,
+        ) -> BoxStream<'static, object_store::Result<object_store::ObjectMeta>> {
+            unreachable!("not exercised")
+        }
+
+        async fn list_with_delimiter(
+            &self,
+            _prefix: Option<&object_store::path::Path>,
+        ) -> object_store::Result<object_store::ListResult> {
+            unreachable!("not exercised")
+        }
+
+        async fn copy_opts(
+            &self,
+            _from: &object_store::path::Path,
+            _to: &object_store::path::Path,
+            _options: object_store::CopyOptions,
+        ) -> object_store::Result<()> {
+            unreachable!("not exercised")
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn fetch_times_out_on_hanging_stream() {
+        // Tokio time is frozen: the 60s wall clock fires without waiting.
+        // (Match on the Result directly: TempFile is not Debug, so no
+        // unwrap_err — {err:?} still works, StorageError is Debug.)
+        let result = fetch_to_tempfile(&HangingStore, "a/b.xlsx", 1024).await;
+        let err = match result {
+            Ok(_) => panic!("hanging stream must time out, not complete"),
+            Err(e) => e,
+        };
+        assert!(matches!(err, StorageError::Timeout), "got: {err:?}");
     }
 }

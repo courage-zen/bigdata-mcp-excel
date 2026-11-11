@@ -32,6 +32,10 @@ testcontainers = "0.24"
 testcontainers-modules = { version = "0.12", features = ["minio"] }
 reqwest = { version = "0.12", features = ["blocking", "json"] }
 tower = { version = "0.5", features = ["util"] }
+# ObjectStore is #[async_trait]-declared, so test mocks must be too.
+async-trait = "0.1"
+# start_paused tests: freezes tokio's clock so wall-clock timeouts fire instantly.
+tokio = { version = "1", features = ["test-util"] }
 
 [features]
 integration = []
