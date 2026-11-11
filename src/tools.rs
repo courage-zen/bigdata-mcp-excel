@@ -1,6 +1,8 @@
 //! The MCP tool surface: one struct per tool's typed args, #[tool] methods
 //! on a stateful `ExcelMcp` handler.
 
+use std::time::Duration;
+
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::*;
 use rmcp::tool;
@@ -10,6 +12,28 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 
 use crate::config::Config;
+use crate::toolerr::ToolError;
+
+/// Render a tool outcome: success JSON or the dual-channel error payload
+/// {"error_code", "error"} with is_error=true. The single place error
+/// payloads are shaped, so codes and messages cannot drift per-tool.
+fn render(value: Result<serde_json::Value, ToolError>) -> CallToolResult {
+    match value {
+        Ok(v) => CallToolResult::success(vec![ContentBlock::text(v.to_string())]),
+        Err(e) => CallToolResult::error(vec![ContentBlock::text(
+            serde_json::json!({
+                "error_code": e.error_code(),
+                "error": e.to_string(),
+            })
+            .to_string(),
+        )]),
+    }
+}
+
+/// PROCESSING_WALL bounds CPU/parse stages (standard §4). Abandoned
+/// spawn_blocking tasks finish on their worker thread; the caller gets
+/// the error at the deadline regardless.
+const PROCESSING_WALL: Duration = Duration::from_secs(30);
 
 #[derive(Clone)]
 pub struct ExcelMcp {
@@ -81,51 +105,7 @@ impl ExcelMcp {
         &self,
         Parameters(args): Parameters<CreateXlsxArgs>,
     ) -> Result<CallToolResult, McpError> {
-        let mut sheets = crate::engine::create::parse_data(&args.data)
-            .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
-        // A bare 2-D array plus sheet_name: name the only sheet.
-        if let (Some(name), true) = (args.sheet_name.clone(), sheets.len() == 1)
-            && sheets[0].name.is_none()
-        {
-            sheets[0].name = Some(name);
-        }
-        let cells = crate::engine::create::count_cells(&sheets);
-        let bytes = tokio::task::spawn_blocking(move || crate::engine::create::build_xlsx(&sheets))
-            .await
-            .map_err(|_| McpError::internal_error("engine task failed", None))?
-            .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
-        let s3 = self.cfg.s3.clone().ok_or_else(|| {
-            McpError::internal_error(
-                "S3 output is not configured on this server; ask the operator to set S3_BUCKET and credentials",
-                None,
-            )
-        })?;
-        // Output key: agent-supplied, validated with the full input rule
-        // set plus the .xlsx suffix rule.
-        let output_key = crate::s3keys::normalize_output_key(&args.output_key, &s3)
-            .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
-        let store = crate::storage::client(&s3)
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        let store: Box<dyn object_store::ObjectStore> = Box::new(store);
-        let max = self.cfg.max_file_bytes;
-        if bytes.len() as u64 > max {
-            return Err(McpError::internal_error(
-                format!("output exceeds the {max} byte limit"),
-                None,
-            ));
-        }
-        crate::storage::upload_bytes(store.as_ref(), &output_key, bytes.clone())
-            .await
-            .map_err(|_| McpError::internal_error("upload failed", None))?;
-
-        let inline_limit = self.cfg.inline_max_bytes as usize;
-        let mut obj = serde_json::json!({ "s3_key": output_key, "cells_written": cells });
-        if bytes.len() <= inline_limit {
-            obj["content_b64"] = serde_json::Value::String(crate::util::base64_encode(&bytes));
-        }
-        Ok(CallToolResult::success(vec![ContentBlock::text(
-            obj.to_string(),
-        )]))
+        Ok(render(create_xlsx_inner(self, args).await))
     }
 
     #[tool(
@@ -135,37 +115,7 @@ impl ExcelMcp {
         &self,
         Parameters(args): Parameters<SheetReadArgs>,
     ) -> Result<CallToolResult, McpError> {
-        let s3 = self.cfg.s3.clone().ok_or_else(|| {
-            McpError::internal_error(
-                "S3 output is not configured on this server; ask the operator to set S3_BUCKET and credentials",
-                None,
-            )
-        })?;
-        let resolved_key = crate::s3keys::resolve_input(&args.s3_key, &s3)
-            .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
-        let store = crate::storage::client(&s3)
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        let store: Box<dyn object_store::ObjectStore> = Box::new(store);
-        let max = self.cfg.max_file_bytes;
-        let tmp = crate::storage::fetch_to_tempfile(store.as_ref(), &resolved_key, max)
-            .await
-            .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
-
-        let sheet = args.sheet.clone();
-        let max_rows = args.max_rows;
-        let result = tokio::task::spawn_blocking(move || {
-            crate::engine::read::read_sheet(tmp.as_path(), sheet.as_deref(), max_rows)
-        })
-        .await
-        .map_err(|_| McpError::internal_error("engine task failed", None))?
-        .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
-
-        let text = match args.format.as_deref() {
-            Some("markdown") => crate::engine::read::to_markdown(&result),
-            _ => serde_json::to_string(&result)
-                .map_err(|e| McpError::internal_error(e.to_string(), None))?,
-        };
-        Ok(CallToolResult::success(vec![ContentBlock::text(text)]))
+        Ok(render(sheet_read_inner(self, args).await))
     }
 
     #[tool(
@@ -175,29 +125,114 @@ impl ExcelMcp {
         &self,
         Parameters(args): Parameters<SheetApplyArgs>,
     ) -> Result<CallToolResult, McpError> {
-        let s3 = self.cfg.s3.clone().ok_or_else(|| {
-            McpError::internal_error(
-                "S3 output is not configured on this server; ask the operator to set S3_BUCKET and credentials",
-                None,
-            )
-        })?;
-        let resolved_key = crate::s3keys::resolve_input(&args.s3_key, &s3)
-            .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
-        let output_key = crate::s3keys::normalize_output_key(&args.output_key, &s3)
-            .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
-        let store = crate::storage::client(&s3)
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        let store: Box<dyn object_store::ObjectStore> = Box::new(store);
-        let max = self.cfg.max_file_bytes;
-        let tmp = crate::storage::fetch_to_tempfile(store.as_ref(), &resolved_key, max)
-            .await
-            .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+        Ok(render(sheet_apply_inner(self, args).await))
+    }
+}
 
-        let sheet = args.sheet.clone();
-        let cells = args.cells;
-        let ops = args.ops;
-        let ops_count = ops.len();
-        let (edited_bytes, applied) = tokio::task::spawn_blocking(move || {
+async fn create_xlsx_inner(
+    server: &ExcelMcp,
+    args: CreateXlsxArgs,
+) -> Result<serde_json::Value, ToolError> {
+    let mut sheets = crate::engine::create::parse_data(&args.data)
+        .map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
+    // A bare 2-D array plus sheet_name: name the only sheet.
+    if let (Some(name), true) = (args.sheet_name.clone(), sheets.len() == 1)
+        && sheets[0].name.is_none()
+    {
+        sheets[0].name = Some(name);
+    }
+    let cells = crate::engine::create::count_cells(&sheets);
+    let bytes = tokio::time::timeout(
+        PROCESSING_WALL,
+        tokio::task::spawn_blocking(move || crate::engine::create::build_xlsx(&sheets)),
+    )
+    .await
+    .map_err(|_| ToolError::EngineTimeout)?
+    .map_err(|_| ToolError::Internal("engine task failed".into()))?
+    .map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
+    let s3 = server.cfg.s3.clone().ok_or(ToolError::S3Unavailable)?;
+    // Output key: agent-supplied, validated with the full input rule set
+    // plus the .xlsx suffix rule.
+    let output_key = crate::s3keys::normalize_output_key(&args.output_key, &s3)?;
+    let store = crate::storage::client(&s3).map_err(|_| ToolError::S3Unavailable)?;
+    let store: Box<dyn object_store::ObjectStore> = Box::new(store);
+    let max = server.cfg.max_file_bytes;
+    if bytes.len() as u64 > max {
+        return Err(ToolError::S3ObjectTooLarge(max));
+    }
+    // StorageError::Failed would map to S3FetchFailed via `?` — wrong for
+    // uploads; wrap explicitly.
+    crate::storage::upload_bytes(store.as_ref(), &output_key, bytes.clone())
+        .await
+        .map_err(|_| ToolError::S3UploadFailed)?;
+
+    let inline_limit = server.cfg.inline_max_bytes as usize;
+    let mut obj = serde_json::json!({ "s3_key": output_key, "cells_written": cells });
+    if bytes.len() <= inline_limit {
+        obj["content_b64"] = serde_json::Value::String(crate::util::base64_encode(&bytes));
+    }
+    Ok(obj)
+}
+
+async fn sheet_read_inner(
+    server: &ExcelMcp,
+    args: SheetReadArgs,
+) -> Result<serde_json::Value, ToolError> {
+    let s3 = server.cfg.s3.clone().ok_or(ToolError::S3Unavailable)?;
+    let resolved_key = crate::s3keys::resolve_input(&args.s3_key, &s3)?;
+    let store = crate::storage::client(&s3).map_err(|_| ToolError::S3Unavailable)?;
+    let store: Box<dyn object_store::ObjectStore> = Box::new(store);
+    let max = server.cfg.max_file_bytes;
+    let tmp = crate::storage::fetch_to_tempfile(store.as_ref(), &resolved_key, max).await?;
+
+    let sheet = args.sheet.clone();
+    let max_rows = args.max_rows;
+    let result = tokio::time::timeout(
+        PROCESSING_WALL,
+        tokio::task::spawn_blocking(move || {
+            crate::engine::read::read_sheet(tmp.as_path(), sheet.as_deref(), max_rows)
+        }),
+    )
+    .await
+    .map_err(|_| ToolError::EngineTimeout)?
+    .map_err(|_| ToolError::Internal("engine task failed".into()))?
+    .map_err(|e| match e {
+        // NoSuchSheet is a caller-input problem; Open failures on a
+        // validated, fetched workbook are internal.
+        crate::engine::read::ReadError::NoSuchSheet(_) => {
+            ToolError::InvalidArguments(e.to_string())
+        }
+        _ => ToolError::Internal(e.to_string()),
+    })?;
+
+    // The wire contract is raw text (markdown or JSON-as-text), not a JSON
+    // object; keep it by returning Value::String.
+    let text = match args.format.as_deref() {
+        Some("markdown") => crate::engine::read::to_markdown(&result),
+        _ => serde_json::to_string(&result).map_err(|e| ToolError::Internal(e.to_string()))?,
+    };
+    Ok(serde_json::Value::String(text))
+}
+
+async fn sheet_apply_inner(
+    server: &ExcelMcp,
+    args: SheetApplyArgs,
+) -> Result<serde_json::Value, ToolError> {
+    let s3 = server.cfg.s3.clone().ok_or(ToolError::S3Unavailable)?;
+    let resolved_key = crate::s3keys::resolve_input(&args.s3_key, &s3)?;
+    let output_key = crate::s3keys::normalize_output_key(&args.output_key, &s3)?;
+    let store = crate::storage::client(&s3).map_err(|_| ToolError::S3Unavailable)?;
+    let store: Box<dyn object_store::ObjectStore> = Box::new(store);
+    let max = server.cfg.max_file_bytes;
+    let tmp = crate::storage::fetch_to_tempfile(store.as_ref(), &resolved_key, max).await?;
+
+    let sheet = args.sheet.clone();
+    let cells = args.cells;
+    let ops = args.ops;
+    let ops_count = ops.len();
+    let (edited_bytes, applied) = tokio::time::timeout(
+        PROCESSING_WALL,
+        tokio::task::spawn_blocking(move || {
             let dst = tempfile::NamedTempFile::new()
                 .map_err(|e| crate::engine::apply::ApplyError::Open(e.to_string()))?;
             let applied = crate::engine::apply::apply_edits(
@@ -210,30 +245,35 @@ impl ExcelMcp {
             std::fs::read(dst.path())
                 .map_err(|e| crate::engine::apply::ApplyError::Open(e.to_string()))
                 .map(|b| (b, applied))
-        })
-        .await
-        .map_err(|_| McpError::internal_error("engine task failed", None))?
-        .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+        }),
+    )
+    .await
+    .map_err(|_| ToolError::EngineTimeout)?
+    .map_err(|_| ToolError::Internal("engine task failed".into()))?
+    .map_err(|e| match e {
+        // Input problems (sheet/address/name/op) vs IO problems (Open/Write)
+        // on a fetched workbook.
+        crate::engine::apply::ApplyError::NoSuchSheet(_)
+        | crate::engine::apply::ApplyError::BadAddress(_)
+        | crate::engine::apply::ApplyError::BadSheetName(_)
+        | crate::engine::apply::ApplyError::BadOp(_) => ToolError::InvalidArguments(e.to_string()),
+        _ => ToolError::Internal(e.to_string()),
+    })?;
 
-        if edited_bytes.len() as u64 > max {
-            return Err(McpError::internal_error(
-                format!("output exceeds the {max} byte limit"),
-                None,
-            ));
-        }
-        crate::storage::upload_bytes(store.as_ref(), &output_key, edited_bytes)
-            .await
-            .map_err(|_| McpError::internal_error("upload failed", None))?;
-
-        let obj = serde_json::json!({
-            "s3_key": output_key,
-            "cells_edited": applied,
-            "ops_applied": ops_count,
-        });
-        Ok(CallToolResult::success(vec![ContentBlock::text(
-            obj.to_string(),
-        )]))
+    if edited_bytes.len() as u64 > max {
+        return Err(ToolError::S3ObjectTooLarge(max));
     }
+    // StorageError::Failed would map to S3FetchFailed via `?` — wrong for
+    // uploads; wrap explicitly.
+    crate::storage::upload_bytes(store.as_ref(), &output_key, edited_bytes)
+        .await
+        .map_err(|_| ToolError::S3UploadFailed)?;
+
+    Ok(serde_json::json!({
+        "s3_key": output_key,
+        "cells_edited": applied,
+        "ops_applied": ops_count,
+    }))
 }
 
 #[tool_handler]
@@ -280,6 +320,35 @@ mod tests {
         }
     }
 
+    /// Assert a business failure and unwrap its payload: business failures
+    /// are Ok(CallToolResult) with is_error=true and a JSON text body
+    /// {"error_code", "error"}; protocol-level Err (rmcp) cannot carry our
+    /// codes, so landing there fails this helper. Asserts the expected
+    /// `code` and a non-empty message, and returns the message for the
+    /// caller's content and no-leak assertions.
+    #[track_caller]
+    fn error_payload(result: &Result<CallToolResult, McpError>, code: &str) -> String {
+        let r = match result {
+            Ok(r) => r,
+            Err(e) => panic!(
+                "business failures must render as tool results, not protocol errors: {}",
+                e.message
+            ),
+        };
+        assert_eq!(r.is_error, Some(true), "business failure sets is_error");
+        let text = extract_text(r).unwrap_or_default();
+        let payload: serde_json::Value = serde_json::from_str(&text)
+            .unwrap_or_else(|e| panic!("error payload must be JSON: {text} ({e})"));
+        assert_eq!(
+            payload["error_code"].as_str(),
+            Some(code),
+            "wrong error_code, payload: {text}"
+        );
+        let msg = payload["error"].as_str().unwrap_or_default().to_string();
+        assert!(!msg.is_empty(), "error message non-null, payload: {text}");
+        msg
+    }
+
     #[tokio::test]
     async fn create_xlsx_rejects_missing_output_key() {
         // The generated-key fallback is gone: a missing output_key must
@@ -303,17 +372,8 @@ mod tests {
                 output_key: "excel-mcp-out/a.xlsx".into(),
             }))
             .await;
-        // The not-configured error surfaces as an MCP error.
-        let msg = match result {
-            Err(e) => e.message.to_string(),
-            Ok(r) => {
-                if r.is_error.unwrap_or(false) {
-                    extract_text(&r).unwrap_or_default()
-                } else {
-                    String::new()
-                }
-            }
-        };
+        // The not-configured error is a business failure with a code.
+        let msg = error_payload(&result, "S3_UNAVAILABLE");
         assert!(msg.contains("not configured"), "got: {msg}");
     }
 
@@ -339,16 +399,7 @@ mod tests {
                 output_key: "not-an-xlsx.csv".into(),
             }))
             .await;
-        let msg = match result {
-            Err(e) => e.message.to_string(),
-            Ok(r) => {
-                if r.is_error.unwrap_or(false) {
-                    extract_text(&r).unwrap_or_default()
-                } else {
-                    String::new()
-                }
-            }
-        };
+        let msg = error_payload(&result, "S3_INVALID_KEY");
         assert!(
             msg.contains(".xlsx"),
             "expected output-key rejection, got: {msg}"
@@ -369,10 +420,7 @@ mod tests {
                 output_key: "excel-mcp-out/a.xlsx".into(),
             }))
             .await;
-        let msg = match &result {
-            Err(e) => e.message.to_string(),
-            Ok(r) => extract_text(r).unwrap_or_default(),
-        };
+        let msg = error_payload(&result, "S3_INVALID_KEY");
         assert!(
             msg.contains("allowlist"),
             "expected allowlist rejection, got: {msg}"
@@ -396,10 +444,7 @@ mod tests {
                 ops: vec![],
             }))
             .await;
-        let msg = match &result {
-            Err(e) => e.message.to_string(),
-            Ok(r) => extract_text(r).unwrap_or_default(),
-        };
+        let msg = error_payload(&result, "S3_INVALID_KEY");
         assert!(
             msg.contains("allowlist"),
             "expected allowlist rejection, got: {msg}"
@@ -428,16 +473,7 @@ mod tests {
                 format: None,
             }))
             .await;
-        let msg = match result {
-            Err(e) => e.message.to_string(),
-            Ok(r) => {
-                if r.is_error.unwrap_or(false) {
-                    extract_text(&r).unwrap_or_default()
-                } else {
-                    String::new()
-                }
-            }
-        };
+        let msg = error_payload(&result, "S3_INVALID_KEY");
         assert!(
             msg.contains("..") || msg.contains("key"),
             "expected input-key rejection, got: {msg}"
@@ -480,15 +516,20 @@ mod tests {
                 format: None,
             }))
             .await;
-        let msg = match &result {
-            Err(e) => e.message.to_string(),
-            Ok(r) => extract_text(r).unwrap_or_default(),
-        };
+        // URL converts fine; the endpoint is unreachable, so the failure is
+        // the download — a fetch error, never a key error. The fixed
+        // "download failed" message carries no endpoint or bucket.
+        let msg = error_payload(&result, "S3_FETCH_FAILED");
         assert!(
             !msg.contains("does not match bucket")
                 && !msg.contains("no object key")
                 && !msg.contains("invalid s3 key"),
             "URL should have been accepted, got: {msg}"
+        );
+        assert!(!msg.contains("uploads"), "must not name the bucket: {msg}");
+        assert!(
+            !msg.contains("127.0.0.1"),
+            "must not leak the endpoint: {msg}"
         );
     }
 
@@ -503,10 +544,7 @@ mod tests {
                 format: None,
             }))
             .await;
-        let msg = match &result {
-            Err(e) => e.message.to_string(),
-            Ok(r) => extract_text(r).unwrap_or_default(),
-        };
+        let msg = error_payload(&result, "S3_INVALID_KEY");
         assert!(
             msg.contains("invalid s3 key"),
             "traversal in URL must be rejected as a key error, got: {msg}"
@@ -528,15 +566,20 @@ mod tests {
                 ops: vec![],
             }))
             .await;
-        let msg = match &result {
-            Err(e) => e.message.to_string(),
-            Ok(r) => extract_text(r).unwrap_or_default(),
-        };
+        // Mirror of the sheet_read accept test: the URL converts to a key,
+        // validation passes, and the failure is the unreachable endpoint's
+        // download — never key rejection — with no endpoint leaked.
+        let msg = error_payload(&result, "S3_FETCH_FAILED");
         assert!(
             !msg.contains("does not match bucket")
                 && !msg.contains("no object key")
                 && !msg.contains("invalid s3 key"),
             "URL should have been accepted, got: {msg}"
+        );
+        assert!(!msg.contains("uploads"), "must not name the bucket: {msg}");
+        assert!(
+            !msg.contains("127.0.0.1"),
+            "must not leak the endpoint: {msg}"
         );
     }
 }
