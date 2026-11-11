@@ -6,12 +6,16 @@ use std::time::Duration;
 
 use object_store::aws::AmazonS3Builder;
 use object_store::path::Path as StorePath;
-use object_store::{ObjectStore, ObjectStoreExt, PutPayload};
+use object_store::{ClientOptions, ObjectStore, ObjectStoreExt, PutPayload};
 
 use crate::config::S3Config;
 
 /// Standard §4: whole-download monotonic wall clock.
 const DOWNLOAD_WALL: Duration = Duration::from_secs(60);
+/// Standard §4: connection establishment timeout.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// Standard §4: per-request read timeout.
+const READ_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Debug, thiserror::Error)]
 pub enum StorageError {
@@ -44,7 +48,12 @@ pub fn client(s3: &S3Config) -> Result<impl ObjectStore, StorageError> {
         .with_access_key_id(&s3.access_key_id)
         .with_secret_access_key(&s3.secret_access_key)
         .with_region(&s3.region)
-        .with_virtual_hosted_style_request(!s3.use_path_style);
+        .with_virtual_hosted_style_request(!s3.use_path_style)
+        .with_client_options(
+            ClientOptions::default()
+                .with_connect_timeout(CONNECT_TIMEOUT)
+                .with_timeout(READ_TIMEOUT),
+        );
     if !s3.endpoint_url.is_empty() {
         builder = builder
             .with_endpoint(&s3.endpoint_url)
@@ -150,16 +159,41 @@ mod tests {
         assert!(client(&s3()).is_ok());
     }
 
+    #[test]
+    fn client_carries_layered_timeouts() {
+        // We cannot read ClientOptions back out of a built store, so the
+        // test pins the constants and the builder wiring side by side:
+        // constants are the standard's numbers, and client() builds.
+        use std::time::Duration;
+        assert_eq!(super::CONNECT_TIMEOUT, Duration::from_secs(10));
+        assert_eq!(super::READ_TIMEOUT, Duration::from_secs(60));
+        assert!(client(&s3()).is_ok());
+    }
+
+    #[tokio::test]
+    async fn fetch_roundtrips_in_memory_object() {
+        use object_store::memory::InMemory;
+
+        let store = InMemory::new();
+        let key = "workspaces/ws-1/report.xlsx";
+        let payload: object_store::PutPayload = b"PK\x03\x04fake-xlsx-bytes".to_vec().into();
+        store
+            .put(&object_store::path::Path::from(key), payload)
+            .await
+            .expect("seed object");
+
+        let tmp = fetch_to_tempfile(&store, key, 1024 * 1024)
+            .await
+            .expect("fetch succeeds");
+        let fetched = std::fs::read(tmp.as_path()).expect("read tempfile");
+        assert_eq!(fetched, b"PK\x03\x04fake-xlsx-bytes");
+    }
+
     /// A store whose GET stream never yields: fetch must hit the wall-clock.
+    #[derive(Debug)]
     struct HangingStore;
 
     impl std::fmt::Display for HangingStore {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            write!(f, "HangingStore")
-        }
-    }
-
-    impl std::fmt::Debug for HangingStore {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             write!(f, "HangingStore")
         }
