@@ -411,6 +411,24 @@ fn create_read_apply_roundtrip() {
         .unwrap();
     assert_eq!(&bytes[0..2], b"PK");
 
+    // The emitted object_url points at the created object and is accepted
+    // back by sheet_read (round-trip).
+    let object_url = created["object_url"].as_str().unwrap().to_string();
+    assert_eq!(
+        object_url,
+        format!(
+            "{}/uploads/workspaces/ws-42/inventory.xlsx",
+            stack.s3_endpoint
+        )
+    );
+    let read_via_url = stack
+        .tool_result_json("sheet_read", serde_json::json!({"s3_key": object_url}), 15)
+        .unwrap();
+    assert_eq!(
+        read_via_url["cells"]["A2"]["value"].as_str().unwrap(),
+        "apple"
+    );
+
     // read: values from S3 through the engine
     let read = stack
         .tool_result_json("sheet_read", serde_json::json!({"s3_key": s3_key}), 11)
@@ -436,6 +454,19 @@ fn create_read_apply_roundtrip() {
         "workspaces/ws-42/edited.xlsx"
     );
     assert_eq!(applied["cells_edited"], 1);
+
+    let apply_url = applied["object_url"].as_str().unwrap().to_string();
+    assert_eq!(
+        apply_url,
+        format!("{}/uploads/workspaces/ws-42/edited.xlsx", stack.s3_endpoint)
+    );
+    let read2_via_url = stack
+        .tool_result_json("sheet_read", serde_json::json!({"s3_key": apply_url}), 16)
+        .unwrap();
+    assert_eq!(
+        read2_via_url["cells"]["C2"]["value"].as_str().unwrap(),
+        "fresh"
+    );
 
     let edited = stack.get_object("workspaces/ws-42/edited.xlsx").unwrap();
     assert_eq!(&edited[0..2], b"PK");
@@ -523,6 +554,33 @@ fn seeded_object_reads_back_via_url() {
         .tool_result_json("sheet_read", serde_json::json!({ "s3_key": url }), 40)
         .unwrap();
     assert_eq!(read["cells"]["A1"]["value"].as_str().unwrap(), "seeded");
+}
+
+#[test]
+#[ignore = "needs Docker + integration feature"]
+fn create_with_cjk_key_returns_readable_object_url() {
+    // object_url percent-encodes non-ASCII key segments; sheet_read
+    // accepts the encoded URL back and resolves the same object.
+    let stack = Stack::start().expect("stack");
+    let created = stack
+        .tool_result_json(
+            "create_xlsx",
+            serde_json::json!({
+                "data": [["k", "v"], ["name", "苹果"]],
+                "output_key": "workspaces/ws-42/报表.xlsx"
+            }),
+            50,
+        )
+        .unwrap();
+    let url = created["object_url"].as_str().unwrap();
+    assert!(
+        url.ends_with("/uploads/workspaces/ws-42/%E6%8A%A5%E8%A1%A8.xlsx"),
+        "got: {url}"
+    );
+    let read = stack
+        .tool_result_json("sheet_read", serde_json::json!({"s3_key": url}), 51)
+        .unwrap();
+    assert_eq!(read["cells"]["B2"]["value"].as_str().unwrap(), "苹果");
 }
 
 /// Fixture builder local to the test crate (the binary crate's modules

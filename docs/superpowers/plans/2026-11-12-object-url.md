@@ -600,7 +600,7 @@ Run: `cargo build 2>&1 | tail -2` — Expected: `Finished` (lock updates).
 ```bash
           # create -> read round-trip through the returned object_url
           # (exercises URL emission AND URL acceptance in one pass)
-          created="$(curl -sf -X POST "$BASE" -H "$AUTH" -H "$Mcp-Session-Id: $SID" -H "$CT" -H "$ACCEPT" \
+          created="$(curl -sf -X POST "$BASE" -H "$AUTH" -H "Mcp-Session-Id: $SID" -H "$CT" -H "$ACCEPT" \
             -d '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"create_xlsx","arguments":{"data":[["name","qty"],["apple",3]],"output_key":"workspaces/ws-1/smoke.xlsx"}},"id":3}')"
           echo "$created" | grep -q 's3_key' || { echo 'create_xlsx returned no s3_key'; echo "$created"; exit 1; }
           echo "$created" | grep -q 'object_url' || { echo 'create_xlsx returned no object_url'; echo "$created"; exit 1; }
@@ -612,7 +612,7 @@ Run: `cargo build 2>&1 | tail -2` — Expected: `Finished` (lock updates).
           URL="$(echo "$created" | sed -n 's/^data://p' \
             | python3 -c 'import json,sys; print(json.load(sys.stdin)["result"]["content"][0]["text"])' \
             | python3 -c 'import json,sys; print(json.load(sys.stdin)["object_url"])')"
-          readback="$(curl -sf -X POST "$BASE" -H "$AUTH" -H "$Mcp-Session-Id: $SID" -H "$CT" -H "$ACCEPT" \
+          readback="$(curl -sf -X POST "$BASE" -H "$AUTH" -H "Mcp-Session-Id: $SID" -H "$CT" -H "$ACCEPT" \
             -d "{\"jsonrpc\":\"2.0\",\"method\":\"tools/call\",\"params\":{\"name\":\"sheet_read\",\"arguments\":{\"s3_key\":\"${URL}\"}},\"id\":4}")"
           echo "$readback" | grep -q 'apple' || { echo 'sheet_read via object_url round-trip failed'; echo "$readback"; exit 1; }
 ```

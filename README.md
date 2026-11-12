@@ -9,7 +9,8 @@ Three tools:
 
 - **`create_xlsx`** — build a new workbook from a 2-D array (or several
   sheets). Strings starting with `=` become formulas. Returns the output
-  `s3_key` plus the file bytes base64-inline when small.
+  `s3_key`, its canonical object-store URL (`object_url`), plus the file
+  bytes base64-inline when small.
 - **`sheet_read`** — read one sheet: cells (values + formulas), merged
   ranges, sheet list. Values are recomputed with a formula engine
   ([IronCalc](https://ironcalc.com/)) when possible; cached values
@@ -43,7 +44,7 @@ Three tools:
 }
 ```
 
-Response: `{"s3_key": "workspaces/ws-42/reports/fruit.xlsx", "cells_written": 6,
+Response: `{"s3_key": "workspaces/ws-42/reports/fruit.xlsx", "object_url": "http://minio:9000/uploads/workspaces/ws-42/reports/fruit.xlsx", "cells_written": 6,
 "content_b64": "..."}` (`content_b64` only when the file is at or below the
 inline size limit).
 
@@ -106,7 +107,7 @@ fields) remain protocol-level `invalid_params`. Timeouts: connect 10s,
 read 60s, download 60s wall clock, processing 30s wall clock.
 
 - `/health` is auth-exempt and returns `{"ok":true,"s3":"configured",
-  "version":"0.3.0"}` — the `s3` field tells you whether the S3 env is
+  "version":"0.4.0"}` — the `s3` field tells you whether the S3 env is
   complete.
 - `/mcp` requires `Authorization: Bearer <key>` when `MCP_AUTH_KEY` is set.
 - The MCP endpoint follows the Streamable HTTP transport: `initialize`,
@@ -165,8 +166,8 @@ agent 远程调用。所有文件 IO 走 S3（推荐同集群 MinIO）：agent �
 
 ```bash
 # 1. 构建并推送镜像（或从 GitHub Release 下载 tarball 后 docker load）
-docker build -t <registry>/excel-mcp:0.3.0 -f deploy/Dockerfile .
-docker push <registry>/excel-mcp:0.3.0
+docker build -t <registry>/excel-mcp:0.4.0 -f deploy/Dockerfile .
+docker push <registry>/excel-mcp:0.4.0
 
 # 2. 创建认证与 S3 凭证 secret
 kubectl create secret generic excel-mcp-auth \
@@ -206,6 +207,9 @@ Agent 的 MCP 配置（Streamable HTTP，带 Bearer 认证）：
 `url` 字段，形如 `http://minio:9000/uploads/workspaces/.../file.xlsx`），
 服务端会自动去掉 endpoint 和 bucket 段转换成 key——agent 不需要下载
 附件到本地解析。参数示例见上文英文部分的 Example calls。
+写入工具（create_xlsx / sheet_apply）的返回值带 `object_url` 字段——
+输出对象的完整对象存储 URL，可直接作为引用传递；该 URL 也能直接传回
+sheet_read 读取。
 
 ## License
 
