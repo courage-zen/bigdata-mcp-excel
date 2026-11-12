@@ -1,13 +1,15 @@
 //! Canonical object-store URL construction for write-tool outputs: pure
-//! string assembly over validated keys, mirroring how the object_store
-//! client addresses the same object.
+//! string assembly over validated keys, in the standard S3 addressing
+//! shapes.
 
 use crate::config::S3Config;
 
 /// Build the canonical reference URL of `key` under `s3`: no credentials,
 /// no presigning — readers need their own access. The shape follows the
-/// resolved addressing style (endpoint/path-style/region), so the URL is
-/// the same address the object_store client would use.
+/// resolved addressing style (endpoint/path-style/region). For custom
+/// endpoints this is the standard virtual-host form, which may differ from
+/// what object_store itself puts on the wire (it uses a custom endpoint
+/// verbatim when virtual-hosted) — the URL is a reference, not a wire log.
 pub fn object_url(s3: &S3Config, key: &str) -> String {
     // Per-segment percent-encoding: '/' stays a literal separator, every
     // other non-unreserved byte of the UTF-8 segment encodes. The set is
