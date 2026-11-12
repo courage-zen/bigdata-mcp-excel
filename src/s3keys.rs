@@ -58,6 +58,18 @@ pub fn validate_input_key(key: &str, s3: &S3Config) -> Result<String, InvalidKey
     Ok(key.to_string())
 }
 
+/// Percent-decode a URL path string. Lenient like the percent-encoding
+/// crate: a '%' not followed by two hex digits passes through literally.
+/// Invalid UTF-8 after decoding is rejected — a URL whose decoded path is
+/// not UTF-8 cannot address an object key (keys are UTF-8 strings).
+fn percent_decode_lenient(input: &str) -> Result<String, InvalidKey> {
+    use percent_encoding::percent_decode_str;
+    percent_decode_str(input)
+        .decode_utf8()
+        .map(|s| s.into_owned())
+        .map_err(|_| InvalidKey("url path is not valid UTF-8".into()))
+}
+
 /// Resolve a tool's input key argument: a plain S3 key passes through; a
 /// full object-store URL (as found in platform attachment metadata) is
 /// converted to its key first. Either way the result is then validated by
@@ -72,8 +84,15 @@ pub fn resolve_input(raw: &str, s3: &S3Config) -> Result<String, InvalidKey> {
         // Not a URL: plain key, validated as-is.
         return validate_input_key(raw, s3);
     };
-    // Drop the query string (presign signatures) before splitting.
+    // Drop the query string (presign signatures) before splitting — an
+    // encoded '?' (%3F) in a key must not be mistaken for the separator.
     let rest = rest.split('?').next().unwrap_or(rest);
+    // Percent-decode the path so emitted/platform URLs with encoded
+    // segments resolve to the raw key. Lenient: malformed escapes pass
+    // through literally; validation below runs on the decoded key, so
+    // traversal smuggled through escapes is still caught. Invalid UTF-8
+    // after decode rejects the input.
+    let rest = percent_decode_lenient(rest)?;
     let (host, path) = match rest.split_once('/') {
         Some(split) => split,
         None => {
@@ -367,5 +386,119 @@ mod tests {
             !err.contains("other-host"),
             "must not echo the rejected URL: {err}"
         );
+    }
+
+    // --- resolve_input: percent-encoded URL paths ---
+
+    #[test]
+    fn resolve_encoded_path_style_url() {
+        // A URL with percent-encoded segments (as our own object_url emits,
+        // and as browsers/SDKs normalize) decodes back to the raw key.
+        let cfg = url_s3();
+        assert_eq!(
+            resolve_input(
+                "http://minio:9000/uploads/workspaces/ws%201/%E6%8A%A5%E8%A1%A8.xlsx",
+                &cfg
+            )
+            .unwrap(),
+            "workspaces/ws 1/报表.xlsx"
+        );
+    }
+
+    #[test]
+    fn resolve_encoded_traversal_is_rejected() {
+        // %2e%2e decodes to '..' — the segment rule still catches it.
+        let cfg = url_s3();
+        assert!(
+            resolve_input("http://minio:9000/uploads/workspaces/a/%2e%2e/b.xlsx", &cfg).is_err()
+        );
+    }
+
+    #[test]
+    fn resolve_encoded_query_separator_is_not_query() {
+        // %3F decodes to '?' INSIDE the key; query stripping happens before
+        // decoding, so this stays a key character, not a query separator.
+        let cfg = url_s3();
+        assert_eq!(
+            resolve_input("http://minio:9000/uploads/workspaces/what%3F.xlsx", &cfg).unwrap(),
+            "workspaces/what?.xlsx"
+        );
+    }
+
+    #[test]
+    fn resolve_invalid_utf8_after_decode_is_rejected() {
+        // %FF is invalid UTF-8 as a standalone byte.
+        let cfg = url_s3();
+        assert!(resolve_input("http://minio:9000/uploads/workspaces/%FF.xlsx", &cfg).is_err());
+    }
+
+    #[test]
+    fn resolve_plain_key_with_percent_passes_through() {
+        // A bare key is not a URL: no decoding, '%' stays literal.
+        let cfg = s3(&[]);
+        assert_eq!(
+            resolve_input("100% done/a.xlsx", &cfg).unwrap(),
+            "100% done/a.xlsx"
+        );
+    }
+
+    #[test]
+    fn resolve_unencoded_cjk_path_still_works() {
+        // IRIs (raw UTF-8 in the path, no percent-escapes) are still
+        // accepted: decode is a no-op on un-escaped bytes.
+        let cfg = url_s3();
+        assert_eq!(
+            resolve_input("http://minio:9000/uploads/workspaces/报表.xlsx", &cfg).unwrap(),
+            "workspaces/报表.xlsx"
+        );
+    }
+
+    #[test]
+    fn resolve_malformed_escape_passes_through_literally() {
+        // percent_decode's documented lenient semantics: a lone '%' not
+        // followed by hex passes through as a literal '%'.
+        let cfg = url_s3();
+        assert_eq!(
+            resolve_input("http://minio:9000/uploads/workspaces/100%25.xlsx", &cfg).unwrap(),
+            "workspaces/100%.xlsx"
+        );
+        // URL-side lone '%' (no valid escape) also passes through literally:
+        assert_eq!(
+            resolve_input("http://minio:9000/uploads/workspaces/100%.xlsx", &cfg).unwrap(),
+            "workspaces/100%.xlsx"
+        );
+    }
+
+    #[test]
+    fn object_url_round_trips_through_resolve_input() {
+        // The invariant this feature exists for: every configuration shape,
+        // every key — resolve_input(object_url(cfg, key)) == key.
+        for (endpoint, path_style) in [
+            ("http://minio:9000", true),
+            ("https://s3.example.com", false),
+            ("", true),
+            ("", false),
+        ] {
+            let cfg = S3Config {
+                bucket: "uploads".into(),
+                region: "us-east-1".into(),
+                access_key_id: "ak".into(),
+                secret_access_key: "sk".into(),
+                endpoint_url: endpoint.into(),
+                use_path_style: path_style,
+                allowed_key_prefixes: vec![],
+            };
+            for key in [
+                "workspaces/ws-1/a.xlsx",
+                "workspaces/ws 1/报表.xlsx",
+                "100% done/a.xlsx",
+                "deep/nested/key ~v2.xlsx",
+            ] {
+                let url = crate::objecturl::object_url(&cfg, key);
+                let back = resolve_input(&url, &cfg)
+                    .unwrap_or_else(|e| panic!("round-trip failed for {url}: {e}"));
+                assert_eq!(back, key, "round-trip mismatch for {url}");
+            }
+        }
     }
 }
