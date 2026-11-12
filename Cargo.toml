@@ -10,6 +10,7 @@ rmcp = { version = "3", features = ["server", "macros", "transport-streamable-ht
 axum = "0.8"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
 object_store = { version = "0.14", features = ["aws"] }
+percent-encoding = "2"
 rust_xlsxwriter = { version = "0.102" }
 calamine = "0.38"
 ironcalc = "0.9"

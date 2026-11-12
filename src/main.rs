@@ -1,6 +1,7 @@
 mod auth;
 mod config;
 mod engine;
+mod objecturl;
 mod s3keys;
 mod server;
 mod storage;

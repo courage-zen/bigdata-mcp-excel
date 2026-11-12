@@ -779,6 +779,7 @@ dependencies = [
  "futures",
  "ironcalc",
  "object_store",
+ "percent-encoding",
  "reqwest 0.12.28",
  "rmcp",
  "rust_xlsxwriter",
