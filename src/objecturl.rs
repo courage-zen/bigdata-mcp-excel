@@ -8,9 +8,6 @@ use crate::config::S3Config;
 /// no presigning — readers need their own access. The shape follows the
 /// resolved addressing style (endpoint/path-style/region), so the URL is
 /// the same address the object_store client would use.
-// Task 3 (write-tool payloads) is the first caller; until then the binary
-// has no reference to this function.
-#[expect(dead_code)]
 pub fn object_url(s3: &S3Config, key: &str) -> String {
     // Per-segment percent-encoding: '/' stays a literal separator, every
     // other non-unreserved byte of the UTF-8 segment encodes. The set is

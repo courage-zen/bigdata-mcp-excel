@@ -109,7 +109,7 @@ impl ExcelMcp {
     }
 
     #[tool(
-        description = "Create a new Excel (.xlsx) workbook from data: a 2-D array of cell values, or {\"sheets\":[{\"name\",\"rows\"}]} for several sheets. Strings starting with \"=\" are formulas. Prefer this over emitting CSV/markdown tables when the deliverable is a real spreadsheet. output_key is required: give the full destination S3 key ending in .xlsx, using the caller's workspace path (workspaces/<ws-id>/<name>.xlsx). Existing objects at that key are overwritten. Returns the output s3_key and the file bytes base64-encoded when small."
+        description = "Create a new Excel (.xlsx) workbook from data: a 2-D array of cell values, or {\"sheets\":[{\"name\",\"rows\"}]} for several sheets. Strings starting with \"=\" are formulas. Prefer this over emitting CSV/markdown tables when the deliverable is a real spreadsheet. output_key is required: give the full destination S3 key ending in .xlsx, using the caller's workspace path (workspaces/<ws-id>/<name>.xlsx). Existing objects at that key are overwritten. Returns the output s3_key, its canonical object-store URL (object_url), and the file bytes base64-encoded when small."
     )]
     async fn create_xlsx(
         &self,
@@ -129,7 +129,7 @@ impl ExcelMcp {
     }
 
     #[tool(
-        description = "Edit an .xlsx workbook from S3 and write a new copy: set cell values/formulas, insert rows/columns, add or rename sheets. The source object is never modified. Pass the source workbook's URL or S3 key as s3_key (URLs are converted to keys automatically); output_key must be the full destination S3 key ending in .xlsx, using the caller's workspace path (workspaces/<ws-id>/<name>.xlsx); an existing object there is overwritten."
+        description = "Edit an .xlsx workbook from S3 and write a new copy: set cell values/formulas, insert rows/columns, add or rename sheets. The source object is never modified. Pass the source workbook's URL or S3 key as s3_key (URLs are converted to keys automatically); output_key must be the full destination S3 key ending in .xlsx, using the caller's workspace path (workspaces/<ws-id>/<name>.xlsx); an existing object there is overwritten. Returns the output s3_key and its canonical object-store URL (object_url)."
     )]
     async fn sheet_apply(
         &self,
@@ -182,7 +182,12 @@ async fn create_xlsx_inner(
         .map_err(|_| ToolError::S3UploadFailed)?;
 
     let inline_limit = server.cfg.inline_max_bytes as usize;
-    let mut obj = serde_json::json!({ "s3_key": output_key, "cells_written": cells });
+    let obj_url = crate::objecturl::object_url(&s3, &output_key);
+    let mut obj = serde_json::json!({
+        "s3_key": output_key,
+        "object_url": obj_url,
+        "cells_written": cells,
+    });
     if bytes.len() <= inline_limit {
         obj["content_b64"] = serde_json::Value::String(crate::util::base64_encode(&bytes));
     }
@@ -294,8 +299,10 @@ async fn sheet_apply_inner(
         .await
         .map_err(|_| ToolError::S3UploadFailed)?;
 
+    let object_url = crate::objecturl::object_url(&s3, &output_key);
     Ok(serde_json::json!({
         "s3_key": output_key,
+        "object_url": object_url,
         "cells_edited": applied,
         "ops_applied": ops_count,
     }))
@@ -315,6 +322,8 @@ impl ServerHandler for ExcelMcp {
                  Every output goes to an explicit output_key you choose under \
                  the caller's workspace path (workspaces/<ws-id>/…); outputs \
                  never land in a shared default prefix. \
+                 Write tools return object_url, the canonical object-store URL \
+                 of the output — pass it around as the object reference. \
                  Tool failures return is_error results with {\"error_code\": ...}: check it before retrying.",
             )
             .with_server_info(Implementation::new(
@@ -629,6 +638,33 @@ mod tests {
         assert!(
             !msg.contains("127.0.0.1"),
             "must not leak the endpoint: {msg}"
+        );
+    }
+
+    #[test]
+    fn tool_descriptions_mention_object_url() {
+        // The agent-facing contract: write tools advertise object_url, so
+        // agents reading tool descriptions know outputs carry a canonical
+        // URL. The router is what tools/list actually serves, so read the
+        // descriptions from it, not from the source attributes.
+        let router = ExcelMcp::tool_router();
+        let tools: Vec<Tool> = router.map.values().map(|r| r.attr.clone()).collect();
+        let by_name = |n: &str| {
+            tools
+                .iter()
+                .find(|t| &*t.name == n)
+                .unwrap_or_else(|| panic!("tool {n} missing"))
+                .clone()
+        };
+        let create = by_name("create_xlsx");
+        assert!(
+            create.description.unwrap().contains("object_url"),
+            "create_xlsx description must mention object_url"
+        );
+        let apply = by_name("sheet_apply");
+        assert!(
+            apply.description.unwrap().contains("object_url"),
+            "sheet_apply description must mention object_url"
         );
     }
 }
